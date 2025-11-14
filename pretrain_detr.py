@@ -28,6 +28,7 @@ from util.misc import use_deterministic_algorithms
 
 seed_everything(42, workers=True)
 
+torch.set_float32_matmul_precision('medium')
 
 def collate_fn(batch, feature_extractor):
     pixel_values = [item[0] for item in batch]
@@ -86,6 +87,9 @@ class Detr(pl.LightningModule):
                 state_dict[k[6:]] = state_dict.pop(k)  # "model."
             self.model.load_state_dict(state_dict, strict=False)
 
+        # RENEW: lightning 변화로 인한 validation_step에서 나오는 출력 저장 부분 추가
+        self._val_outputs = []
+
     def forward(self, pixel_values, pixel_mask):
         outputs = self.model(pixel_values=pixel_values, pixel_mask=pixel_mask)
         return outputs
@@ -119,18 +123,28 @@ class Detr(pl.LightningModule):
         loss, loss_dict = self.common_step(batch, batch_idx)
         loss_dict["loss"] = loss
         del loss
-        return loss_dict
+        # RENEW: return 하지 않고 val_outputs 안에 저장
+        # return loss_dict
+        self._val_outputs.append(loss_dict)
 
-    def validation_epoch_end(self, outputs):
+    # RENEW: Lightning에서 validation~을 on_validation~으로 이름 변경
+    # def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self):
         log_dict = {
             "step": torch.tensor(self.global_step, dtype=torch.float32),
             "epoch": torch.tensor(self.current_epoch, dtype=torch.float32),
         }
         for k in outputs[0].keys():
-            log_dict[f"validation_" + k] = (
-                torch.stack([x[k] for x in outputs]).mean().item()
+            # RENEW: 클래스에 저장된 값 사용
+            # log_dict[f"validation_" + k] = (
+            #     torch.stack([x[k] for x in outputs]).mean().item()
+            # )
+            log_dict[f"validation_{k}"] = (
+                torch.stack([x[k] for x in self._val_outputs]).mean().item()
             )
         self.log_dict(log_dict, on_epoch=True)
+        # RENEW: 에폭마다 초기화
+        self._val_outputs = [] 
 
     def test_step(self, batch, batch_idx):
         # get the inputs
@@ -398,7 +412,11 @@ if __name__ == "__main__":
             trainer = Trainer(
                 precision=args.precision,
                 logger=logger,
-                gpus=args.gpus,
+                # RENEW: GPU 옵션 삭제 -> 가속기와 DEVICE로 분리
+                # gpus=args.gpus,
+                accelerator="gpu", 
+                devices=args.gpus,
+                #####
                 max_epochs=args.max_epochs,
                 gradient_clip_val=args.gradient_clip_val,
                 strategy=DDPStrategy(find_unused_parameters=False),
@@ -465,7 +483,11 @@ if __name__ == "__main__":
             trainer = Trainer(
                 precision=args.precision,
                 logger=logger,
-                gpus=args.gpus,
+                # RENEW: GPU 옵션 삭제 -> 가속기와 DEVICE로 분리
+                # gpus=args.gpus,
+                accelerator="gpu", 
+                devices=args.gpus,
+                #####
                 max_epochs=args.max_epochs_finetune,
                 gradient_clip_val=args.gradient_clip_val,
                 strategy=DDPStrategy(find_unused_parameters=False),
@@ -515,7 +537,14 @@ if __name__ == "__main__":
 
         # Eval
         trainer = Trainer(
-            precision=args.precision, logger=logger, gpus=1, max_epochs=-1
+            precision=args.precision,
+            logger=logger,
+                # RENEW: GPU 옵션 삭제 -> 가속기와 DEVICE로 분리
+                # gpus=args.gpus,
+                accelerator="gpu", 
+                devices=1,
+                #####
+            max_epochs=-1
         )
         if "visual_genome" in args.data_path:
             test_dataset = VGDetection(

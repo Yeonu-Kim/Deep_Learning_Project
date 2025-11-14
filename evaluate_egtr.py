@@ -22,6 +22,7 @@ from model.deformable_detr import DeformableDetrConfig, DeformableDetrFeatureExt
 from model.egtr import DetrForSceneGraphGeneration
 from train_egtr import collate_fn, evaluate_batch
 
+torch.set_float32_matmul_precision('medium')
 
 @torch.no_grad()
 def calculate_fps(model, dataloader):
@@ -128,6 +129,7 @@ def evaluate(
 
 
 if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def str2bool(v):
         if isinstance(v, bool):
@@ -227,8 +229,14 @@ if __name__ == "__main__":
     config.logit_adj_tau = args.logit_adj_tau
 
     model = DetrForSceneGraphGeneration.from_pretrained(
-        args.architecture, config=config, ignore_mismatched_sizes=True
-    )
+        args.architecture, config=config, ignore_mismatched_sizes=True, low_cpu_mem_usage=False
+    ).to(device)
+    # # Parameter Debugging
+    # print("-------------------Model Initialization Check-----------------")
+    # model.load_state_dict(model.state_dict(), strict=False)
+    # for name, param in model.named_parameters():
+    #     print(name, param.data.mean().item(), param.data.std().item())
+
     ckpt_path = sorted(
         glob(f"{args.artifact_path}/checkpoints/epoch=*.ckpt"),
         key=lambda x: int(x.split("epoch=")[1].split("-")[0]),

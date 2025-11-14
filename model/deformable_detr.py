@@ -42,7 +42,7 @@ from PIL import Image
 from torch import Tensor, nn
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
-from transformers import DetrFeatureExtractor
+from transformers import AutoFeatureExtractor
 from transformers.activations import ACT2FN
 from transformers.file_utils import (
     ModelOutput,
@@ -267,7 +267,7 @@ class DeformableDetrConfig(PretrainedConfig):
         return self.d_model
 
 
-class DeformableDetrFeatureExtractor(DetrFeatureExtractor):
+class DeformableDetrFeatureExtractor(AutoFeatureExtractor):
     # only different post_process
     # https://github.com/huggingface/transformers/pull/19140/files#diff-1a733eaefea2a0e31453af1f2df3808bddd73900d61ec714d11dc25547ed0194
     def post_process(self, outputs, target_sizes):
@@ -459,7 +459,7 @@ if is_scipy_available():
     from scipy.optimize import linear_sum_assignment
 
 if is_vision_available():
-    from transformers.models.detr.feature_extraction_detr import (
+    from transformers.image_transforms import (
         center_to_corners_format,
     )
 
@@ -717,15 +717,23 @@ class DeformableDetrFrozenBatchNorm2d(nn.Module):
 # Copied from transformers.models.detr.modeling_detr.replace_batch_norm with Detr->DeformableDetr
 def replace_batch_norm(m, name=""):
     for attr_str in dir(m):
-        target_attr = getattr(m, attr_str)
-        if isinstance(target_attr, nn.BatchNorm2d):
-            frozen = DeformableDetrFrozenBatchNorm2d(target_attr.num_features)
-            bn = getattr(m, attr_str)
-            frozen.weight.data.copy_(bn.weight)
-            frozen.bias.data.copy_(bn.bias)
-            frozen.running_mean.data.copy_(bn.running_mean)
-            frozen.running_var.data.copy_(bn.running_var)
-            setattr(m, attr_str, frozen)
+        bn = getattr(m, attr_str)
+        if isinstance(bn, nn.BatchNorm2d):
+            # BatchNorm2d가 meta tensor인지 확인
+            if bn.weight.device.type == "meta":
+                # meta tensor라면 실제 weight copy 없이 구조만 맞춤
+                frozen = DeformableDetrFrozenBatchNorm2d(bn.num_features)
+                setattr(m, attr_str, frozen)
+            else:
+                # 일반 tensor라면 기존 방식으로 안전하게 복사
+                frozen = DeformableDetrFrozenBatchNorm2d(bn.num_features)
+                frozen.weight.data.copy_(bn.weight)
+                frozen.bias.data.copy_(bn.bias)
+                frozen.running_mean.data.copy_(bn.running_mean)
+                frozen.running_var.data.copy_(bn.running_var)
+                setattr(m, attr_str, frozen)
+
+    # 재귀적으로 하위 모듈 처리
     for n, ch in m.named_children():
         replace_batch_norm(ch, n)
 
@@ -2415,7 +2423,11 @@ class DeformableDetrForObjectDetection(DeformableDetrPreTrainedModel):
 
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
-        self.class_embed.bias.data = torch.ones(config.num_labels) * bias_value
+        # RENEW: tensor 타입 관련 오류로 인한 수정
+        # self.class_embed.bias.data = torch.ones(config.num_labels) * bias_value
+        bias_tensor = torch.ones(config.num_labels, dtype=self.class_embed.bias.dtype, device=self.class_embed.bias.device) * bias_value
+        self.class_embed.bias.data.copy_(bias_tensor)
+        ######
         nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
         nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
 
