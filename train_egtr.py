@@ -39,6 +39,8 @@ from util.misc import use_deterministic_algorithms
 
 seed_everything(42, workers=True)
 
+torch.set_float32_matmul_precision('medium')
+
 # Reference: https://github.com/yuweihao/KERN/blob/master/models/eval_rels.py
 def evaluate_batch(
     outputs,
@@ -175,13 +177,31 @@ def evaluate_batch(
 
 def collate_fn(batch, feature_extractor):
     pixel_values = [item[0] for item in batch]
-    encoding = feature_extractor.pad_and_create_pixel_mask(
-        pixel_values, return_tensors="pt"
-    )
     labels = [item[1] for item in batch]
+    
+    # Manually pad images and create pixel masks
+    # Get the maximum height and width in the batch
+    max_height = max([img.shape[1] for img in pixel_values])
+    max_width = max([img.shape[2] for img in pixel_values])
+    
+    padded_images = []
+    pixel_masks = []
+    
+    for img in pixel_values:
+        c, h, w = img.shape
+        # Create padded image (pad with zeros)
+        padded_img = torch.zeros((c, max_height, max_width), dtype=img.dtype)
+        padded_img[:, :h, :w] = img
+        padded_images.append(padded_img)
+        
+        # Create pixel mask (1 for valid pixels, 0 for padding)
+        mask = torch.zeros((max_height, max_width), dtype=torch.long)
+        mask[:h, :w] = 1
+        pixel_masks.append(mask)
+    
     batch = {}
-    batch["pixel_values"] = encoding["pixel_values"]
-    batch["pixel_mask"] = encoding["pixel_mask"]
+    batch["pixel_values"] = torch.stack(padded_images)
+    batch["pixel_mask"] = torch.stack(pixel_masks)
     batch["labels"] = labels
     return batch
 
@@ -263,13 +283,26 @@ class SGG(pl.LightningModule):
             self.model, load_info = DetrForSceneGraphGeneration.from_pretrained(
                 pretrained,
                 config=config,
+                device_map={"": "cuda"},
                 ignore_mismatched_sizes=True,
                 output_loading_info=True,
                 fg_matrix=fg_matrix,
             )
+            # RENEW: 트랜스포머에서의 UNPACK 구조 변경
+            # self.initialized_keys = load_info["missing_keys"] + [
+            #     _key for _key, _, _ in load_info["mismatched_keys"]
+            # ]
             self.initialized_keys = load_info["missing_keys"] + [
-                _key for _key, _, _ in load_info["mismatched_keys"]
+                _key if isinstance(_key, str) else _key[0] 
+                for _key in load_info["mismatched_keys"]
             ]
+            #####
+
+            # # Parameter Debugging
+            # print("-------------------Model Initialization Check-----------------")
+            # self.model.load_state_dict(self.model.state_dict(), strict=False)
+            # for name, param in self.model.named_parameters():
+            #     print(name, param.data.mean().item(), param.data.std().item())
 
         if main_trained:
             state_dict = torch.load(main_trained, map_location="cpu")["state_dict"]
@@ -289,6 +322,9 @@ class SGG(pl.LightningModule):
         self.coco_evaluator = coco_evaluator
         self.oi_evaluator = oi_evaluator
         self.feature_extractor = feature_extractor
+
+        # RENEW: lightning 변화로 인한 validation_step에서 나오는 출력 저장 부분 추가
+        self._val_outputs = []
 
     def forward(self, pixel_values, pixel_mask):
         outputs = self.model(
@@ -334,18 +370,28 @@ class SGG(pl.LightningModule):
         loss, loss_dict = self.common_step(batch, batch_idx)
         loss_dict["loss"] = loss
         del loss
-        return loss_dict
+        # RENEW: return 하지 않고 val_outputs 안에 저장
+        # return loss_dict
+        self._val_outputs.append(loss_dict)
 
-    def validation_epoch_end(self, outputs):
+    # RENEW: Lightning에서 validation~을 on_validation~으로 이름 변경
+    # def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self):
         log_dict = {
             "step": torch.tensor(self.global_step, dtype=torch.float32),
             "epoch": torch.tensor(self.current_epoch, dtype=torch.float32),
         }
-        for k in outputs[0].keys():
-            log_dict[f"validation_" + k] = (
-                torch.stack([x[k] for x in outputs]).mean().item()
+        for k in self._val_outputs[0].keys():
+            # RENEW: 클래스에 저장된 값 사용
+            # log_dict[f"validation_" + k] = (
+            #     torch.stack([x[k] for x in outputs]).mean().item()
+            # )
+            log_dict[f"validation_{k}"] = (
+                torch.stack([x[k] for x in self._val_outputs]).mean().item()
             )
         self.log_dict(log_dict, on_epoch=True)
+        # RENEW: 에폭마다 초기화
+        self._val_outputs = [] 
 
     @rank_zero_only
     def on_train_start(self) -> None:
@@ -770,7 +816,11 @@ if __name__ == "__main__":
             trainer = Trainer(
                 precision=args.precision,
                 logger=logger,
-                gpus=args.gpus,
+                # RENEW: GPU 옵션 삭제 -> 가속기와 DEVICE로 분리
+                # gpus=args.gpus,
+                accelerator="gpu", 
+                devices=args.gpus,
+                #####
                 max_epochs=args.max_epochs,
                 gradient_clip_val=args.gradient_clip_val,
                 strategy=DDPStrategy(find_unused_parameters=False),
@@ -858,7 +908,11 @@ if __name__ == "__main__":
                 precision=args.precision,
                 logger=logger,
                 max_epochs=args.max_epochs_finetune,
-                gpus=args.gpus,
+                # RENEW: GPU 옵션 삭제 -> 가속기와 DEVICE로 분리
+                # gpus=args.gpus,
+                accelerator="gpu", 
+                devices=args.gpus,
+                #####
                 gradient_clip_val=args.gradient_clip_val,
                 strategy=DDPStrategy(find_unused_parameters=False),
                 callbacks=[checkpoint_callback, early_stop_callback],
@@ -895,7 +949,14 @@ if __name__ == "__main__":
 
         # Eval
         trainer = Trainer(
-            precision=args.precision, logger=logger, gpus=1, max_epochs=-1
+            precision=args.precision,
+            logger=logger,
+            # RENEW: GPU 옵션 삭제 -> 가속기와 DEVICE로 분리
+            # gpus=args.gpus,
+            accelerator="gpu", 
+            devices=1,
+            #####
+            max_epochs=-1
         )
         if "visual_genome" in args.data_path:
             test_dataset = VGDataset(

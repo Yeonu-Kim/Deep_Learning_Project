@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers.models.detr.feature_extraction_detr import center_to_corners_format
+from transformers.image_transforms import center_to_corners_format
 from transformers.utils import ModelOutput
 
 from .deformable_detr import (
@@ -135,7 +135,11 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
 
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
-        self.class_embed.bias.data = torch.ones(config.num_labels) * bias_value
+        # RENEW: tensor 타입 관련 오류로 인한 수정
+        # self.class_embed.bias.data = torch.ones(config.num_labels) * bias_value
+        bias_tensor = torch.ones(config.num_labels, dtype=self.class_embed.bias.dtype, device=self.class_embed.bias.device) * bias_value
+        self.class_embed.bias.data.copy_(bias_tensor)
+        ######
         nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
         nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
 
