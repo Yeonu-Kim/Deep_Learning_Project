@@ -7,6 +7,13 @@ import json
 from glob import glob
 
 import torch
+if torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
+elif torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+else:
+    DEVICE = torch.device("cpu")
+
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -29,8 +36,8 @@ def calculate_fps(model, dataloader):
     model.eval()
     for batch in tqdm(dataloader):
         outputs = model(
-            pixel_values=batch["pixel_values"].cuda(),
-            pixel_mask=batch["pixel_mask"].cuda(),
+            pixel_values=batch["pixel_values"].to(DEVICE),
+            pixel_mask=batch["pixel_mask"].to(DEVICE),
             output_attentions=False,
             output_attention_states=True,
             output_hidden_states=True,
@@ -67,8 +74,8 @@ def evaluate(
 
     for batch in tqdm(dataloader):
         outputs = model(
-            pixel_values=batch["pixel_values"].cuda(),
-            pixel_mask=batch["pixel_mask"].cuda(),
+            pixel_values=batch["pixel_values"].to(DEVICE),
+            pixel_mask=batch["pixel_mask"].to(DEVICE),
             output_attentions=False,
             output_attention_states=True,
             output_hidden_states=True,
@@ -129,7 +136,7 @@ def evaluate(
 
 
 if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
 
     def str2bool(v):
         if isinstance(v, bool):
@@ -246,7 +253,7 @@ if __name__ == "__main__":
         state_dict[k[6:]] = state_dict.pop(k)  # "model."
 
     model.load_state_dict(state_dict)
-    model.cuda()
+    model.to(DEVICE)
     model.eval()
 
     # FPS
@@ -266,7 +273,12 @@ if __name__ == "__main__":
         )
 
         # Save eval metric
-        device = "".join(torch.cuda.get_device_name(0).split()[1:2])
+        if torch.cuda.is_available():
+            device = "".join(torch.cuda.get_device_name(0).split()[1:2])
+        elif torch.backends.mps.is_available():
+            device = "MPS"
+        else:
+            device = "CPU"
         filename = f'{ckpt_path.replace(".ckpt", "")}__{args.split}__{len(test_dataloader)}__{device}'
         if args.logit_adjustment:
             filename += f"__la_{args.logit_adj_tau}"
