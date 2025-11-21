@@ -11,6 +11,13 @@ from pathlib import Path
 import numpy as np
 import pytorch_lightning as pl
 import torch
+if torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
+elif torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+else:
+    DEVICE = torch.device("cpu")
+
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
@@ -276,14 +283,17 @@ class SGG(pl.LightningModule):
             assert backbone_dirpath
             self.model = DetrForSceneGraphGeneration(config=config, fg_matrix=fg_matrix)
             self.model.model.backbone.load_state_dict(
-                torch.load(f"{backbone_dirpath}/{config.backbone}.pt")
+                torch.load(f"{backbone_dirpath}/{config.backbone}.pt", map_location=DEVICE)
             )
             self.initialized_keys = []
         else:
+            # CUDA 있을 때만 device_map 사용, 나머지는 None
+            device_map = {"": "cuda"} if torch.cuda.is_available() else None
+
             self.model, load_info = DetrForSceneGraphGeneration.from_pretrained(
                 pretrained,
                 config=config,
-                device_map={"": "cuda"},
+                device_map=device_map,
                 ignore_mismatched_sizes=True,
                 output_loading_info=True,
                 fg_matrix=fg_matrix,
@@ -296,6 +306,8 @@ class SGG(pl.LightningModule):
                 _key if isinstance(_key, str) else _key[0] 
                 for _key in load_info["mismatched_keys"]
             ]
+        # 공통: 마지막에 내가 원하는 DEVICE로 옮기기
+        self.model.to(DEVICE)
             #####
 
             # # Parameter Debugging
@@ -986,7 +998,12 @@ if __name__ == "__main__":
 
         # Save eval metric
         metric = metric[0]
-        device = "".join(torch.cuda.get_device_name(0).split()[1:2])
+        if torch.cuda.is_available():
+            device = "".join(torch.cuda.get_device_name(0).split()[1:2])
+        elif torch.backends.mps.is_available():
+            device = "MPS"
+        else:
+            device = "CPU"
         filename = f'{ckpt_path.replace(".ckpt", "")}__{args.split}__{len(test_dataloader)}__{device}'
         if args.logit_adjustment:
             filename += f"__la_{args.logit_adj_tau}"
