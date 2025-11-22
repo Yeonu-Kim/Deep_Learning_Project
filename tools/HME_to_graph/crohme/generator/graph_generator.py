@@ -10,10 +10,8 @@ class GraphGenerator:
     def __init__(self, latex_data):
         """
         Args:
-            latex_class_file: latex_class.json 파일 경로
-            latex_data: 수식 관계 데이터
+            latex_data: 수식 관계 데이터 (latex_class.json을 json.load 한 dict)
         """
-        
         # symbol2id 매핑 로드
         symbols = latex_data["symbols"]
         self.symbol_to_id = symbols.get('symbol2id', {})
@@ -27,7 +25,6 @@ class GraphGenerator:
         
         # key → int, value → str
         self.rel_id_to_name = {int(k): v for k, v in relations.items()}
-
         # 역매핑: 관계명 → ID
         self.rel_to_id = {v: k for k, v in self.rel_id_to_name.items()}
     
@@ -52,72 +49,65 @@ class GraphGenerator:
     
     def tokens_to_graph(self, tokens: List[str]) -> Tuple[List[int], List[List[int]]]:
         """
-        토큰 시퀀스를 (기호 ID 리스트, 관계 리스트)로 변환
-        relations에 symbol_ids 사용
+        토큰 시퀀스를 (심볼 ID 리스트, 관계 리스트)로 변환.
+        
+        - 심볼 ID 리스트: latex_class.json의 symbol2id에 따라 매핑된 정수 ID
+        - 관계 리스트: [from_node_idx, to_node_idx, rel_id] 형태
+        
+        node index는 "토큰 시퀀스에서 관계 토큰이 아닌 심볼의 등장 순서"를 그대로 사용.
+        예를 들어 토큰이 [4, Right, n, Right, -] 라면
+        심볼 시퀀스는 [4, n, -] → 노드 인덱스 [0, 1, 2]
         """
-        symbol_ids = []
-        relations = []
+        symbol_tokens: List[str] = []
+        token_pos_to_node_idx: Dict[int, int] = {}
+        relations: List[List[int]] = []
         unknown_symbols = set()
         
-        i = 0
-        while i < len(tokens):
-            token = tokens[i]
-            
-            # 현재 토큰이 기호
-            if token not in self.rel_to_id:
-                if token in self.symbol_to_id:
-                    symbol_id = self.symbol_to_id[token]
-                else:
-                    symbol_id = -1
-                    unknown_symbols.add(token)
+        # 1-pass: 심볼 토큰만 모으고, 토큰 위치→노드 인덱스 매핑
+        node_idx = 0
+        for i, tok in enumerate(tokens):
+            if tok not in self.rel_to_id:  # 관계 키워드가 아니면 심볼
+                token_pos_to_node_idx[i] = node_idx
+                symbol_tokens.append(tok)
+                node_idx += 1
+        
+        # 2-pass: 관계 토큰을 보면서 앞/뒤 심볼을 엣지로 연결
+        for i, tok in enumerate(tokens):
+            if tok in self.rel_to_id:
+                rel_name = tok
+                if rel_name == "NoRel":
+                    continue  # NoRel은 엣지 만들지 않음
                 
-                symbol_ids.append(symbol_id)
-                current_idx = len(symbol_ids) - 1
-                
-                # 다음이 관계 키워드인지 확인
-                if i + 1 < len(tokens) and tokens[i + 1] in self.rel_to_id:
-                    relation = tokens[i + 1]
-                    
-                    if i + 2 < len(tokens):
-                        # 다음 기호가 올 것으로 예상
-                        next_idx = len(symbol_ids)  # 아직 추가 전
-                        next_token = tokens[i + 2]
-                        
-                        if next_token in self.symbol_to_id:
-                            next_symbol_id = self.symbol_to_id[next_token]
-                        else:
-                            next_symbol_id = -1
-                            unknown_symbols.add(next_token)
-                        
-                        # NoRel이 아닌 경우만 관계 추가
-                        if relation != "NoRel":
-                            relation_id = self.rel_to_id[relation]
-                            relations.append([symbol_id, next_symbol_id, relation_id])
-                        
-                        i += 1  # relation 토큰 건너뛰기
-                i += 1
+                # 관계 토큰 양 옆에 심볼이 있는 경우만 사용
+                if (i - 1) in token_pos_to_node_idx and (i + 1) in token_pos_to_node_idx:
+                    src_idx = token_pos_to_node_idx[i - 1]
+                    dst_idx = token_pos_to_node_idx[i + 1]
+                    rel_id = self.rel_to_id[rel_name]
+                    relations.append([src_idx, dst_idx, rel_id])
+        
+        # 심볼 토큰을 ID로 변환 (labels 역할)
+        symbol_ids: List[int] = []
+        for tok in symbol_tokens:
+            if tok in self.symbol_to_id:
+                symbol_ids.append(self.symbol_to_id[tok])
             else:
-                # 관계만 나온 경우
-                i += 1
+                symbol_ids.append(-1)
+                unknown_symbols.add(tok)
         
         if unknown_symbols:
             print(f"Warning: Unknown symbols found: {unknown_symbols}")
         
-        return relations
+        return symbol_ids, relations
     
     def create_graph_from_file(self, 
                                annotation_file: str,
-                               file_id: Optional[str] = None) -> Dict:
+                               file_id: Optional[str] = None) -> Optional[Dict]:
         """
         단일 어노테이션 파일을 읽어 그래프로 변환합니다.
         
-        Args:
-            annotation_file: 어노테이션 파일 경로
-            file_id: 파일 ID (None이면 파일명에서 추출)
-        
         Returns:
             {
-                'symbol_ids': List[int],  # latex_class.json의 ID
+                'labels': List[int],      # 노드별 심볼 클래스 ID
                 'relations': List[List[int]],
                 'filename': str,
                 'file_id': str
@@ -127,63 +117,51 @@ class GraphGenerator:
             line = f.readline()
         
         filename, tokens = self.parse_annotation_line(line)
-        
         if filename is None or tokens is None:
             return None
         
-        relations = self.tokens_to_graph(tokens)
+        symbol_ids, relations = self.tokens_to_graph(tokens)
         
         if file_id is None:
             file_id = Path(filename).stem
         
         return {
+            'labels': symbol_ids,
             'relations': relations,
             'filename': filename,
             'file_id': file_id
         }
     
     def create_graph_batch(self, 
-                          annotation_file: str,
-                          output_format: str = 'detailed') -> Dict:
+                           annotation_file: str,
+                           output_format: str = 'detailed') -> Dict:
         """
         어노테이션 파일의 모든 항목을 그래프로 변환합니다.
         
-        Args:
-            annotation_file: 어노테이션 파일 경로
-            output_format: 'simple' 또는 'detailed'
-        
-        Returns:
-            output_format이 'simple'인 경우:
-            {
-                file_id: [[s, o, r], ...],
-                ...
-            }
-            
-            output_format이 'detailed'인 경우:
-            {
-                file_id: {
-                    'relations': [[s, o, r], ...],
-                    'filename': str
-                },
-                ...
-            }
+        output_format:
+            'simple'  → file_id: [[src, dst, rel_id], ...]
+            'detailed'→ file_id: {
+                             'labels': [...],
+                             'relations': [[src, dst, rel_id], ...],
+                             'filename': str
+                          }
         """
-        result = {}
+        result: Dict[str, Dict] = {}
         
         with open(annotation_file, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
                 filename, tokens = self.parse_annotation_line(line)
-                
                 if filename is None or tokens is None:
                     continue
                 
                 file_id = Path(filename).stem
-                relations = self.tokens_to_graph(tokens)
+                symbol_ids, relations = self.tokens_to_graph(tokens)
                 
                 if output_format == 'simple':
                     result[file_id] = relations
-                else:  # detailed
+                else:
                     result[file_id] = {
+                        'labels': symbol_ids,
                         'relations': relations,
                         'filename': filename
                     }
@@ -191,18 +169,27 @@ class GraphGenerator:
         return result
     
     def save_graph_json(self,
-                       annotation_file: str,
-                       output_file: str,
-                       split_name: str = 'train',
-                       output_format: str = 'detailed'):
+                        annotation_file: str,
+                        output_file: str,
+                        split_name: str = 'train',
+                        output_format: str = 'detailed'):
         """
         그래프를 JSON 파일로 저장합니다.
         
-        Args:
-            annotation_file: 입력 어노테이션 파일
-            output_file: 출력 JSON 파일
-            split_name: 데이터셋 스플릿 이름
-            output_format: 'simple' 또는 'detailed'
+        result (detailed 기준):
+        {
+          "train": {
+            "file_id": {
+              "labels": [...],
+              "relations": [[src, dst, rel_id], ...],
+              "filename": "crohme2019/train/XXX.inkml"
+            },
+            ...
+          },
+          "rel_categories": { "Right": 1, ... },
+          "num_classes": 320,
+          "symbol_to_id": {...}
+        }
         """
         graphs = self.create_graph_batch(annotation_file, output_format)
         

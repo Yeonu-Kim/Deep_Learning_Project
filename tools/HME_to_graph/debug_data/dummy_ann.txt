@@ -1,0 +1,2 @@
+crohme2019/test/DUMMY_001.inkml	4 Right n Right - Right 4
+crohme2019/test/DUMMY_002.inkml	x Above y Right z
