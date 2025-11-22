@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader
 
 from data.open_image import OIDataset, oi_get_statistics
 from data.visual_genome import VGDataset, vg_get_statistics
+from data.formula_graph_dataset import FormulaGraphDataset
 from lib.evaluation.coco_eval import CocoEvaluator
 from lib.evaluation.oi_eval import OIEvaluator
 from lib.evaluation.sg_eval import (
@@ -555,6 +556,27 @@ if __name__ == "__main__":
         "--backbone_dirpath", type=str, default=""
     )  # required when from_scratch is True
 
+    # Dataset
+    parser.add_argument(
+        "--dataset_name",
+        type=str,
+        default="vg",
+        choices=["vg", "formula"],
+        help="Dataset type: 'vg' for Visual Genome, 'formula' for CROHME/HME formula graphs.",
+    )
+    parser.add_argument(
+        "--formula_json",
+        type=str,
+        default="data/formula/test_graphs.json",
+        help="Path to formula graphs JSON (e.g., data/formula/test_graphs.json).",
+    )
+    parser.add_argument(
+        "--formula_images_root",
+        type=str,
+        default=".",
+        help="Root directory for formula images. JSON의 filename 앞에 붙을 루트 경로.",
+    )
+
     # Architecture
     parser.add_argument("--architecture", type=str, default="SenseTime/deformable-detr")
     parser.add_argument("--auxiliary_loss", type=str2bool, default=False)
@@ -640,44 +662,72 @@ if __name__ == "__main__":
     )
 
     # Dataset
-    if "visual_genome" in args.data_path:
-        train_dataset = VGDataset(
-            data_folder=args.data_path,
-            feature_extractor=feature_extractor_train,
+    if args.dataset_name == "formula":
+        # 수식 그래프용 FormulaGraphDataset 사용
+        train_dataset = FormulaGraphDataset(
+            json_path=args.formula_json,
             split="train",
-            num_object_queries=args.num_queries,
-            debug=args.debug,
+            images_root=args.formula_images_root,
+            feature_extractor=feature_extractor_train,
         )
-        val_dataset = VGDataset(
-            data_folder=args.data_path,
-            feature_extractor=feature_extractor,
+        val_dataset = FormulaGraphDataset(
+            json_path=args.formula_json,
             split="val",
-            num_object_queries=args.num_queries,
+            images_root=args.formula_images_root,
+            feature_extractor=feature_extractor,
         )
-        cats = train_dataset.coco.cats
-        id2label = {k - 1: v["name"] for k, v in cats.items()}  # 0 ~ 149
-        fg_matrix = vg_get_statistics(train_dataset, must_overlap=True)
+
+        # 일단 간단한 id2label (0~num_classes-1 → string) 형태로 둠
+        if getattr(train_dataset, "num_classes", None) is not None:
+            id2label = {i: str(i) for i in range(train_dataset.num_classes)}
+        else:
+            id2label = None
+
+        # freq bias 안 쓸 거라면 fg_matrix는 None으로 두고,
+        # 실행할 때 --use_freq_bias False 주면 됨.
+        fg_matrix = None
+
     else:
-        train_dataset = OIDataset(
-            data_folder=args.data_path,
-            feature_extractor=feature_extractor_train,
-            split="train",
-            filter_duplicate_rels=args.filter_duplicate_rels,
-            filter_multiple_rels=args.filter_multiple_rels,
-            num_object_queries=args.num_queries,
-            debug=args.debug,
-        )
-        val_dataset = OIDataset(
-            data_folder=args.data_path,
-            split="val",
-            num_object_queries=args.num_queries,
-            feature_extractor=feature_extractor,
-        )
-        id2label = train_dataset.classes_to_ind  # 0 ~ 600
-        fg_matrix = oi_get_statistics(train_dataset, must_overlap=True)
+        # 기존 코드 그대로 유지: data_path로 VG / OI 자동 선택
+        if "visual_genome" in args.data_path:
+            train_dataset = VGDataset(
+                data_folder=args.data_path,
+                feature_extractor=feature_extractor_train,
+                split="train",
+                num_object_queries=args.num_queries,
+                debug=args.debug,
+            )
+            val_dataset = VGDataset(
+                data_folder=args.data_path,
+                feature_extractor=feature_extractor,
+                split="val",
+                num_object_queries=args.num_queries,
+            )
+            cats = train_dataset.coco.cats
+            id2label = {k - 1: v["name"] for k, v in cats.items()}  # 0 ~ 149
+            fg_matrix = vg_get_statistics(train_dataset, must_overlap=True)
+        else:
+            train_dataset = OIDataset(
+                data_folder=args.data_path,
+                feature_extractor=feature_extractor_train,
+                split="train",
+                filter_duplicate_rels=args.filter_duplicate_rels,
+                filter_multiple_rels=args.filter_multiple_rels,
+                num_object_queries=args.num_queries,
+                debug=args.debug,
+            )
+            val_dataset = OIDataset(
+                data_folder=args.data_path,
+                split="val",
+                num_object_queries=args.num_queries,
+                feature_extractor=feature_extractor,
+            )
+            id2label = train_dataset.classes_to_ind  # 0 ~ 600
+            fg_matrix = oi_get_statistics(train_dataset, must_overlap=True)
+
     print("Number of training examples:", len(train_dataset))
     print("Number of validation examples:", len(val_dataset))
-
+    
     # Dataloader
     train_dataloader = DataLoader(
         train_dataset,
@@ -731,14 +781,16 @@ if __name__ == "__main__":
                         BasicSceneGraphEvaluator.all_modes(multiple_preds=False),
                     )
                 )
-        if "visual_genome" in args.data_path:
-            coco_evaluator = CocoEvaluator(
-                val_dataset.coco, ["bbox"]
-            )  # initialize evaluator with ground truths
-        elif "open-image" in args.data_path:
-            oi_evaluator = OIEvaluator(
-                train_dataset.rel_categories, train_dataset.ind_to_classes
-            )
+        # formula일 때는 COCO/OI evaluator 안된다
+        if args.dataset_name != "formula":
+            if "visual_genome" in args.data_path:
+                coco_evaluator = CocoEvaluator(
+                    val_dataset.coco, ["bbox"]
+                )  # initialize evaluator with ground truths
+            elif "open-image" in args.data_path:
+                oi_evaluator = OIEvaluator(
+                    train_dataset.rel_categories, train_dataset.ind_to_classes
+                )
 
     # Logger setting
     save_dir = f"{args.output_path}/egtr__{'/'.join(args.pretrained.split('/')[-3:]).replace('/', '__')}"
@@ -943,7 +995,7 @@ if __name__ == "__main__":
                 print(e)
 
     # Evaluation
-    if args.eval_when_train_end and (trainer is None or trainer.is_global_zero):
+    if args.eval_when_train_end and args.dataset_name != "formula" and (trainer is None or trainer.is_global_zero):
         if args.skip_train and args.finetune:
             logger = TensorBoardLogger(
                 save_dir, name=f"{name}__finetune", version=version
