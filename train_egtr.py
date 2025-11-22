@@ -677,11 +677,32 @@ if __name__ == "__main__":
             feature_extractor=feature_extractor,
         )
 
-        # 일단 간단한 id2label (0~num_classes-1 → string) 형태로 둠
-        if getattr(train_dataset, "num_classes", None) is not None:
-            id2label = {i: str(i) for i in range(train_dataset.num_classes)}
-        else:
-            id2label = None
+        # ----- 여기부터 NEW: num_labels / id2label 설정 -----
+        # 1순위: FormulaGraphDataset 안에 num_classes가 정의되어 있으면 그걸 사용
+        num_classes = getattr(train_dataset, "num_classes", None)
+
+        # 2순위: 없으면 latex_class.json을 열어서 클래스 개수 추정
+        if num_classes is None:
+            try:
+                latex_class_path = os.path.join("data", "formula", "latex_class.json")
+                with open(latex_class_path, "r") as f:
+                    latex_classes = json.load(f)
+                if isinstance(latex_classes, dict):
+                    # dict 형식일 때: key 개수 = 클래스 개수라고 가정
+                    num_classes = len(latex_classes)
+                elif isinstance(latex_classes, list):
+                    # list 형식이면 역시 길이로 클래스 개수 추정
+                    num_classes = len(latex_classes)
+            except Exception as e:
+                print("[formula] latex_class.json에서 클래스 개수 읽기 실패:", e)
+
+        # 3순위: 그래도 못 구하면, 안전한 fallback 값 (너네 심볼 클래스 수 근처로 넉넉하게)
+        if num_classes is None:
+            print("[formula] WARNING: num_classes를 찾을 수 없어서 임시로 320으로 설정합니다.")
+            num_classes = 320
+
+        # id2label: 0 ~ num_classes-1 -> 문자열 라벨
+        id2label = {i: str(i) for i in range(num_classes)}
 
         # freq bias 안 쓸 거라면 fg_matrix는 None으로 두고,
         # 실행할 때 --use_freq_bias False 주면 됨.
