@@ -14,7 +14,6 @@ class CROHMEDataset(Dataset):
         "test": {
             "UN19_1032_em_455": {
                 "relations": [[103,1,3],[2,200,1],[200,3,4]],
-                "symbol_ids": [103,1,2,200,3],
                 "filename": "crohme2019/test/UN19_1032_em_455.inkml"
             },
             ...
@@ -32,13 +31,15 @@ class CROHMEDataset(Dataset):
         self.num_object_queries = num_object_queries  # max number of symbols per formula
 
         # load annotation
-        with open(os.path.join(data_folder, f"{split}_graphs.json"), "r") as f:
+        with open(os.path.join(data_folder, f"{split}/{split}_graphs.json"), "r") as f:
             self.ann_data = json.load(f)
 
-        self.data = self.ann_data[split]
+        self.data = self.ann_data["test"]
         self.rel_categories = self.ann_data["rel_categories"]
+        self.symbol_to_id = self.ann_data["symbol_to_id"]
         self.num_rel_classes = len(self.rel_categories)
         self.ids = list(self.data.keys())
+        self.num_classes = self.ann_data["num_classes"]
 
     def __len__(self):
         return len(self.ids)
@@ -48,30 +49,63 @@ class CROHMEDataset(Dataset):
         ann = self.data[item_id]
 
         # 이미지 읽기
-        img_path = os.path.join(self.data_folder, ann["filename"])
+        filename = ann["filename"]
+        filename = filename.replace('crohme2019/valid/', 'valid/images/')
+        filename = filename.replace('crohme2019/train/', 'train/images/')
+        filename = filename.replace('crohme2019/test/', 'test/images/')
+        # inkml을 png로 변환
+        if filename.endswith('.inkml'):
+            filename = filename[:-6] + '.png'
+        
+        img_path = os.path.join(self.data_folder, filename)
         img = Image.open(img_path).convert("RGB")
 
         # symbol_ids & relations
-        symbol_ids = ann["symbol_ids"]
+        relations = ann.get("relations", [])
+        symbol_set = set()
+        for rel in relations:
+            if len(rel) >= 2:
+                symbol_set.add(rel[0])  # subject
+                symbol_set.add(rel[1])  # object
+        symbol_ids = sorted(list(symbol_set))
         relations = ann["relations"]  # already in symbol_ids form [[sub_id, obj_id, rel_id], ...]
 
         # optional: truncate or pad
-        if len(symbol_ids) > self.num_object_queries:
-            symbol_ids = symbol_ids[: self.num_object_queries]
-        else:
-            symbol_ids = symbol_ids + [0] * (self.num_object_queries - len(symbol_ids))  # padding 0
+        num_symbols = len(symbol_ids)
+        if num_symbols > self.num_object_queries:
+            symbol_ids = symbol_ids[:self.num_object_queries]
+            num_symbols = self.num_object_queries
+        
+        symbol_to_idx = {sid: i for i, sid in enumerate(symbol_ids)}
+        padded_symbol_ids = symbol_ids + [0] * (self.num_object_queries - len(symbol_ids))
 
         # convert relations to tensor
         rel_tensor = torch.zeros((self.num_object_queries, self.num_object_queries, self.num_rel_classes), dtype=torch.float32)
-        for sub_id, obj_id, rel_id in relations:
-            if sub_id < self.num_object_queries and obj_id < self.num_object_queries:
-                rel_tensor[sub_id, obj_id, rel_id] = 1.0
+        
+        for relation in relations:
+            if len(relation) != 3:
+                continue
+            sub_id, obj_id, rel_id = relation
+            
+            # Map symbol IDs to indices
+            if sub_id in self.symbol_to_id and obj_id in self.symbol_to_id:
+                sub_idx = self.symbol_to_id[sub_id]
+                obj_idx = self.symbol_to_id[obj_id]
+                
+                if sub_idx < self.num_object_queries and obj_idx < self.num_object_queries:
+                    if 0 <= rel_id < self.num_rel_classes:
+                        rel_tensor[sub_idx, obj_idx, rel_id] = 1.0
 
+        # EGTR에서 필요한 필드들
         target = {
-            "symbol_ids": torch.tensor(symbol_ids, dtype=torch.long),
+            "class_labels": torch.tensor(padded_symbol_ids, dtype=torch.long),  # EGTR expects this
+            "boxes": torch.zeros((self.num_object_queries, 4), dtype=torch.float32),  # dummy boxes
             "rel": rel_tensor,
+            "image_id": torch.tensor([idx], dtype=torch.long),
+            "orig_size": torch.tensor([img.height, img.width], dtype=torch.long),
+            "size": torch.tensor([img.height, img.width], dtype=torch.long),
             "item_id": item_id,
-            "filename": ann["filename"]
+            "filename": ann["filename"],
         }
 
         encoding = self.feature_extractor(images=img, return_tensors="pt")
@@ -91,11 +125,9 @@ def latex_symbol_graph_get_statistics(dataset, must_exist=True):
 
     fg_matrix = np.zeros((num_symbols, num_symbols, num_relations), dtype=np.int64)
 
-    for idx in tqdm(range(len(dataset))):
+    for idx in range(len(dataset)):
         item_id = dataset.ids[idx]
         ann = dataset.data[item_id]
-
-        symbol_ids = ann["symbol_ids"]
         relations = ann["relations"]  # [[sub_symbol_id, obj_symbol_id, rel_id], ...]
 
         if must_exist and len(relations) == 0:

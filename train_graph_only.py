@@ -19,8 +19,10 @@ from pytorch_lightning.strategies.ddp import DDPStrategy
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from torch.utils.data import DataLoader
 
+from data.crohme import CROHMEDataset, latex_symbol_graph_get_statistics
 from data.open_image import OIDataset, oi_get_statistics
 from data.visual_genome import VGDataset, vg_get_statistics
+from lib.evaluation.crohme_eval import CROHMEEvaluator
 from lib.evaluation.coco_eval import CocoEvaluator
 from lib.evaluation.oi_eval import OIEvaluator
 from lib.evaluation.sg_eval import (
@@ -50,6 +52,7 @@ def evaluate_batch(
     single_sgg_evaluator,
     single_sgg_evaluator_list,
     oi_evaluator,
+    crohme_evaluator,
     num_labels,
     max_topk=100,
 ):
@@ -83,6 +86,36 @@ def evaluate_batch(
             .numpy(),
             "gt_classes": target_labels.clone().numpy(),
         }
+
+        # ADD: crohme_evaluator 추가
+        if crohme_evaluator is not None:
+            for j, target in enumerate(targets):
+                # Get image id
+                img_id = target.get("image_id", target.get("filename", j))
+                if isinstance(img_id, torch.Tensor):
+                    img_id = img_id.item()
+                
+                # Predicted relations from model output
+                pred_rel_logits = outputs["pred_rel"][j]  # [num_queries, num_queries, num_rel_classes]
+                pred_rel_probs = torch.softmax(pred_rel_logits, dim=-1)
+                pred_rel_labels = pred_rel_probs.argmax(dim=-1)  # [num_queries, num_queries]
+                
+                # Extract predicted relations (non-background only)
+                pred_relations = []
+                num_queries = pred_rel_labels.shape[0]
+                for s in range(num_queries):
+                    for o in range(num_queries):
+                        rel = pred_rel_labels[s, o].item()
+                        if rel > 0:  # Skip background
+                            pred_relations.append([s, o, rel])
+                
+                # Ground truth relations
+                gt_relations = target["rel"].nonzero().cpu().numpy()  # [num_rels, 3]
+                
+                # Update evaluator
+                crohme_evaluator.update({
+                    img_id: {'relations': np.array(pred_relations), 'gt_relations': gt_relations}
+                })
 
         if multiple_sgg_evaluator is not None:
             triplet_scores = torch.mul(pred_rel, sub_ob_scores.unsqueeze(-1))
@@ -231,6 +264,7 @@ class SGG(pl.LightningModule):
         single_sgg_evaluator_list,
         coco_evaluator,
         oi_evaluator,
+        crohme_evaluator,
         feature_extractor,
         num_queries,
         ce_loss_coefficient,
@@ -322,6 +356,7 @@ class SGG(pl.LightningModule):
         self.single_sgg_evaluator_list = single_sgg_evaluator_list
         self.coco_evaluator = coco_evaluator
         self.oi_evaluator = oi_evaluator
+        self.crohme_evaluator = crohme_evaluator
         self.feature_extractor = feature_extractor
         # ADD: Graph Only 모드 추가
         self.graph_only = graph_only
@@ -444,6 +479,7 @@ class SGG(pl.LightningModule):
                 self.single_sgg_evaluator,
                 self.single_sgg_evaluator_list,
                 self.oi_evaluator,
+                self.crohme_evaluator,
                 self.config.num_labels,
             )
             # eval OD
@@ -493,6 +529,17 @@ class SGG(pl.LightningModule):
         if self.oi_evaluator is not None:
             metrics = self.oi_evaluator.aggregate_metrics()
             log_dict.update(metrics)
+        if self.crohme_evaluator is not None:
+            self.crohme_evaluator.synchronize_between_processes()
+            self.crohme_evaluator.accumulate()
+            metrics = self.crohme_evaluator.summarize()
+            log_dict.update({
+                'crohme_edge_f1': metrics['edge_f1'],
+                'crohme_relation_f1': metrics['relation_f1'],
+                'crohme_graph_acc': metrics['graph_accuracy']
+            })
+            self.crohme_evaluator.reset()
+
         self.log_dict(log_dict, on_epoch=True)
         return log_dict
 
@@ -656,22 +703,21 @@ if __name__ == "__main__":
 
     # Dataset
     if "dataset/crohme" in args.data_path:
-        train_dataset = CHROMEDataset(
+        train_dataset = CROHMEDataset(
             data_folder=args.data_path,
             feature_extractor=feature_extractor_train,
             split="train",
             num_object_queries=args.num_queries,
             debug=args.debug,
         )
-        val_dataset = VGDataset(
+        val_dataset = CROHMEDataset(
             data_folder=args.data_path,
             feature_extractor=feature_extractor,
-            split="val",
+            split="valid",
             num_object_queries=args.num_queries,
         )
-        cats = train_dataset.coco.cats
-        id2label = {k - 1: v["name"] for k, v in cats.items()}  # 0 ~ 149
-        fg_matrix = vg_get_statistics(train_dataset, must_overlap=True)
+        id2label = {int(v): k for k, v in train_dataset.symbol_to_id.items()}
+        fg_matrix = latex_symbol_graph_get_statistics(train_dataset, must_exist=True)
     # else:
     #     train_dataset = OIDataset(
     #         data_folder=args.data_path,
@@ -718,6 +764,7 @@ if __name__ == "__main__":
     single_sgg_evaluator = None
     coco_evaluator = None
     oi_evaluator = None
+    crohme_evaluator = None
 
     multiple_sgg_evaluator_list = []
     single_sgg_evaluator_list = []
@@ -746,7 +793,12 @@ if __name__ == "__main__":
                         BasicSceneGraphEvaluator.all_modes(multiple_preds=False),
                     )
                 )
-        if "visual_genome" in args.data_path:
+        if "crohme" in args.data_path:
+            crohme_evaluator = CROHMEEvaluator(
+                rel_categories=train_dataset.rel_categories,
+                num_classes=train_dataset.num_classes
+            )
+        elif "visual_genome" in args.data_path:
             coco_evaluator = CocoEvaluator(
                 val_dataset.coco, ["bbox"]
             )  # initialize evaluator with ground truths
@@ -806,6 +858,7 @@ if __name__ == "__main__":
         single_sgg_evaluator_list=single_sgg_evaluator_list,
         coco_evaluator=coco_evaluator,
         oi_evaluator=oi_evaluator,
+        crohme_evaluator=crohme_evaluator,
         feature_extractor=feature_extractor,
         num_queries=args.num_queries,
         ce_loss_coefficient=args.ce_loss_coefficient,
@@ -852,7 +905,7 @@ if __name__ == "__main__":
                 #####
                 max_epochs=args.max_epochs,
                 gradient_clip_val=args.gradient_clip_val,
-                strategy=DDPStrategy(find_unused_parameters=False),
+                strategy=DDPStrategy(find_unused_parameters=True),
                 callbacks=[checkpoint_callback, early_stop_callback],
                 accumulate_grad_batches=args.accumulate,
             )
@@ -905,6 +958,7 @@ if __name__ == "__main__":
                 single_sgg_evaluator_list=single_sgg_evaluator_list,
                 coco_evaluator=coco_evaluator,
                 oi_evaluator=oi_evaluator,
+                crohme_evaluator=crohme_evaluator,
                 feature_extractor=feature_extractor,
                 num_queries=args.num_queries,
                 ce_loss_coefficient=args.ce_loss_coefficient,
@@ -943,7 +997,7 @@ if __name__ == "__main__":
                 devices=args.gpus,
                 #####
                 gradient_clip_val=args.gradient_clip_val,
-                strategy=DDPStrategy(find_unused_parameters=False),
+                strategy=DDPStrategy(find_unused_parameters=True),
                 callbacks=[checkpoint_callback, early_stop_callback],
                 accumulate_grad_batches=args.accumulate,
             )
@@ -987,7 +1041,15 @@ if __name__ == "__main__":
             #####
             max_epochs=-1
         )
-        if "visual_genome" in args.data_path:
+        if "crohme" in args.data_path:
+            test_dataset = CROHMEDataset(
+            data_folder=args.data_path,
+            feature_extractor=feature_extractor_train,
+            split="test",
+            num_object_queries=args.num_queries,
+            debug=args.debug,
+        )
+        elif "visual_genome" in args.data_path:
             test_dataset = VGDataset(
                 data_folder=args.data_path,
                 feature_extractor=feature_extractor,
