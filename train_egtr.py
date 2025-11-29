@@ -661,21 +661,56 @@ if __name__ == "__main__":
         )
     )
 
+    # ===== Accelerator / devices / strategy 설정 =====
+    if torch.cuda.is_available():
+        accelerator = "gpu"
+        devices = args.gpus
+        strategy = DDPStrategy(find_unused_parameters=False)
+        print("[Trainer] Using CUDA GPU with DDP (devices =", devices, ")")
+    elif torch.backends.mps.is_available():
+        accelerator = "mps"
+        devices = 1
+        strategy = "auto"  # DDP 사용 안 함
+        print("[Trainer] Using Apple MPS (Metal) on 1 device, strategy=auto")
+    else:
+        accelerator = "cpu"
+        devices = 1
+        strategy = "auto"
+        print("[Trainer] Using CPU (no GPU/MPS), strategy=auto")
+
+
     # Dataset
+        # Dataset
     if args.dataset_name == "formula":
-        # 수식 그래프용 FormulaGraphDataset 사용
+        # 먼저 train dataset은 그대로 생성
         train_dataset = FormulaGraphDataset(
             json_path=args.formula_json,
             split="train",
             images_root=args.formula_images_root,
             feature_extractor=feature_extractor_train,
         )
-        val_dataset = FormulaGraphDataset(
-            json_path=args.formula_json,
-            split="val",
-            images_root=args.formula_images_root,
-            feature_extractor=feature_extractor,
-        )
+
+        # ----- validation split 결정 -----
+        # JSON 안에 어떤 split들이 있는지 확인해서,
+        # val이 없으면 train을 대신 쓰도록 우회
+        val_split = "val"
+        try:
+            val_dataset = FormulaGraphDataset(
+                json_path=args.formula_json,
+                split=val_split,
+                images_root=args.formula_images_root,
+                feature_extractor=feature_extractor,
+            )
+        except KeyError as e:
+            print("[formula] WARNING:", e)
+            print("[formula] 'val' split이 없어서, 일단 train split을 validation에도 같이 사용합니다.")
+            val_split = "train"
+            val_dataset = FormulaGraphDataset(
+                json_path=args.formula_json,
+                split=val_split,
+                images_root=args.formula_images_root,
+                feature_extractor=feature_extractor,
+            )
 
         # ----- 여기부터 NEW: num_labels / id2label 설정 -----
         # 1순위: FormulaGraphDataset 안에 num_classes가 정의되어 있으면 그걸 사용
@@ -688,15 +723,13 @@ if __name__ == "__main__":
                 with open(latex_class_path, "r") as f:
                     latex_classes = json.load(f)
                 if isinstance(latex_classes, dict):
-                    # dict 형식일 때: key 개수 = 클래스 개수라고 가정
                     num_classes = len(latex_classes)
                 elif isinstance(latex_classes, list):
-                    # list 형식이면 역시 길이로 클래스 개수 추정
                     num_classes = len(latex_classes)
             except Exception as e:
                 print("[formula] latex_class.json에서 클래스 개수 읽기 실패:", e)
 
-        # 3순위: 그래도 못 구하면, 안전한 fallback 값 (너네 심볼 클래스 수 근처로 넉넉하게)
+        # 3순위: 그래도 못 구하면 fallback
         if num_classes is None:
             print("[formula] WARNING: num_classes를 찾을 수 없어서 임시로 320으로 설정합니다.")
             num_classes = 320
@@ -704,9 +737,9 @@ if __name__ == "__main__":
         # id2label: 0 ~ num_classes-1 -> 문자열 라벨
         id2label = {i: str(i) for i in range(num_classes)}
 
-        # freq bias 안 쓸 거라면 fg_matrix는 None으로 두고,
-        # 실행할 때 --use_freq_bias False 주면 됨.
+        # freq bias 안 쓸 거라면 fg_matrix는 None
         fg_matrix = None
+
 
     else:
         # 기존 코드 그대로 유지: data_path로 VG / OI 자동 선택
@@ -749,6 +782,12 @@ if __name__ == "__main__":
     print("Number of training examples:", len(train_dataset))
     print("Number of validation examples:", len(val_dataset))
     
+    print("Number of training examples:", len(train_dataset))
+    print("Number of validation examples:", len(val_dataset))
+    
+    # 🔧 num_workers가 0이면 persistent_workers는 False여야 함
+    persistent_workers_flag = args.num_workers > 0
+
     # Dataloader
     train_dataloader = DataLoader(
         train_dataset,
@@ -756,7 +795,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         pin_memory=True,
         num_workers=args.num_workers,
-        persistent_workers=True,
+        persistent_workers=persistent_workers_flag,
         shuffle=True,
     )
     val_dataloader = DataLoader(
@@ -765,7 +804,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         pin_memory=True,
         num_workers=args.num_workers,
-        persistent_workers=True,
+        persistent_workers=persistent_workers_flag,
     )
 
     # Evaluator
@@ -903,12 +942,12 @@ if __name__ == "__main__":
                 logger=logger,
                 # RENEW: GPU 옵션 삭제 -> 가속기와 DEVICE로 분리
                 # gpus=args.gpus,
-                accelerator="gpu", 
-                devices=args.gpus,
+                accelerator=accelerator, 
+                devices=devices,
                 #####
                 max_epochs=args.max_epochs,
                 gradient_clip_val=args.gradient_clip_val,
-                strategy=DDPStrategy(find_unused_parameters=False),
+                strategy=strategy,
                 callbacks=[checkpoint_callback, early_stop_callback],
                 accumulate_grad_batches=args.accumulate,
             )
@@ -995,11 +1034,11 @@ if __name__ == "__main__":
                 max_epochs=args.max_epochs_finetune,
                 # RENEW: GPU 옵션 삭제 -> 가속기와 DEVICE로 분리
                 # gpus=args.gpus,
-                accelerator="gpu", 
-                devices=args.gpus,
+                accelerator=accelerator, 
+                devices=devices,
                 #####
                 gradient_clip_val=args.gradient_clip_val,
-                strategy=DDPStrategy(find_unused_parameters=False),
+                strategy=strategy,
                 callbacks=[checkpoint_callback, early_stop_callback],
                 accumulate_grad_batches=args.accumulate,
             )
@@ -1038,7 +1077,7 @@ if __name__ == "__main__":
             logger=logger,
             # RENEW: GPU 옵션 삭제 -> 가속기와 DEVICE로 분리
             # gpus=args.gpus,
-            accelerator="gpu", 
+            accelerator=accelerator, 
             devices=1,
             #####
             max_epochs=-1

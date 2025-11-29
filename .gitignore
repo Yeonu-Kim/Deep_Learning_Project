@@ -142,3 +142,24 @@ tmp.png
 dataset
 artifacts
 output
+
+# ====== 추가 : formula-ocr / EGTR =======
+# 학습 결과물 / 로그
+outputs/
+
+# 큰 formula 그래프 JSON들 (데이터 파일)
+data/formula/formula_graphs_*.json
+data/formula/formula_graphs_from_hme_dummy.json
+data/formula/formula_graphs_with_dummy_bbox.json
+data/formula/formula_graphs_dummy.json
+data/formula/test_graphs.json
+
+# HME_to_graph 쪽 데이터/출력/캐시
+tools/HME_to_graph/data/
+tools/HME_to_graph/debug_data/
+tools/HME_to_graph/output/
+tools/HME_to_graph/**/__pycache__/
+
+# 로컬 디버깅 스크립티
+debug_bbox_loss_formula.py
+

@@ -58,6 +58,13 @@ class GraphGenerator:
         예를 들어 토큰이 [4, Right, n, Right, -] 라면
         심볼 시퀀스는 [4, n, -] → 노드 인덱스 [0, 1, 2]
         """
+
+        # 👇 심볼 토큰 alias → 실제 기호로 매핑 (COMMA 등)
+        alias_map = {
+            "COMMA": ",",
+            # 필요하면 나중에 "DOT": ".", "SPACE": r"\ " 같은 것도 추가 가능
+        }
+                
         symbol_tokens: List[str] = []
         token_pos_to_node_idx: Dict[int, int] = {}
         relations: List[List[int]] = []

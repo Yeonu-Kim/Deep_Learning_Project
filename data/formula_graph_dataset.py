@@ -1,59 +1,48 @@
-# data/formula/formula_graph_dataset.py
+# data/formula_graph_dataset.py
+#
+# CROHME/HME 스타일 "수식 그래프 JSON"을 EGTR에서 사용할 수 있는
+# PyTorch Dataset 형태로 바꿔주는 클래스.
+#
+# JSON 예시:
+# {
+#   "train": [
+#     {
+#       "filename": "crohme2019/train/MfrDB2372.inkml",
+#       "labels": [15, 232, 167, ...],
+#       "relations": [
+#         [0, 1, 5],
+#         [2, 3, 1],
+#         ...
+#       ],
+#       "bboxes": [
+#         [x_min, y_min, x_max, y_max],
+#         ...
+#       ]
+#     },
+#     ...
+#   ],
+#   "val": [...],
+#   "test": [...]
+# }
+#
+# 이미지 파일은 예를 들어:
+#   tools/HME_to_graph/data/crohme/images/crohme2019/train/MfrDB2372.png
+# 처럼 있다고 가정하고,
+#   images_root = "tools/HME_to_graph/data/crohme/images"
+# 라고 넘겨주면 됨.
 
 import json
 import os
-from typing import Any, Dict, List, Tuple, Union
+from typing import List, Dict, Any
 
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
-import numpy as np
 
 
 class FormulaGraphDataset(Dataset):
     """
-    Crohme/HME 수식 그래프용 Dataset.
-
-    ✅ 지원 JSON 포맷 1 (dict):
-
-    {
-      "train": {
-        "UN19_1032_em_455": {
-          "filename": "crohme2019/train/UN19_1032_em_455.png",
-          "boxes": [[x0,y0,x1,y1], ...],   # 또는 "bboxes"
-          "labels": [class_id, ...],
-          "relations": [[i,j,rel_id], ...],
-          "latex": "\\frac{a+b}{c^2}"      # (옵션)
-        },
-        ...
-      },
-
-      "val": { ... },
-      "test": { ... },
-
-      "symbol_to_id": {...},
-      "rel_categories": {...},
-      "num_classes": 320
-    }
-
-    ✅ 지원 JSON 포맷 2 (list, EGTR formula용):
-
-    {
-      "test": [
-        {
-          "filename": "DUMMY_001.inkml",  # 또는 "DUMMY_001"
-          "bboxes": [[x0,y0,x1,y1], ...],
-          "labels": [...],
-          "relations": [[i,j,rel_id], ...]
-        },
-        ...
-      ],
-      "rel_categories": {...},
-      "num_classes": 320,
-      "symbol_to_id": {...}
-    }
-
-    ➕ train/val이 없으면 train/val 요청 시 자동으로 test split을 대신 사용.
+    수식 그래프(JSON) + 이미지 파일을 EGTR 학습용으로 변환하는 Dataset.
     """
 
     def __init__(
@@ -61,184 +50,193 @@ class FormulaGraphDataset(Dataset):
         json_path: str,
         split: str,
         images_root: str,
-        feature_extractor=None,
-        transforms=None,
+        feature_extractor,
     ):
+        """
+        Args:
+            json_path: formula_graphs_*.json 경로
+            split: "train", "val", "test" 중 하나
+            images_root: 이미지 루트 디렉토리
+                        (예: tools/HME_to_graph/data/crohme/images)
+            feature_extractor: DeformableDetrFeatureExtractor (train/val용)
+        """
         super().__init__()
-        assert split in ["train", "val", "test"], f"Unknown split: {split}"
-
-        # -------------------------
-        # 1. JSON 로드
-        # -------------------------
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        # split이 없으면 test로 fallback
-        if split not in data:
-            if "test" in data:
-                print(
-                    f"[FormulaGraphDataset] Split '{split}' not found in {json_path}. "
-                    f"대신 'test' split을 사용합니다 (sanity check 용)."
-                )
-                split_data = data["test"]
-            else:
-                raise KeyError(
-                    f"Split '{split}' not found in {json_path}. "
-                    f"지금 JSON 안에 '{split}' 키가 없는 것 같아. "
-                    f"현재 구조를 한번 확인해봐야 해."
-                )
-        else:
-            split_data = data[split]
-
-        # dict / list 형식 자동 감지
-        if isinstance(split_data, dict):
-            # {"id": {...}, ...}
-            self.mode = "dict"
-            self.graphs: Dict[str, Dict[str, Any]] = split_data
-            self.ids: List[Union[str, int]] = list(self.graphs.keys())
-        elif isinstance(split_data, list):
-            # [{...}, {...}, ...]
-            self.mode = "list"
-            self.samples: List[Dict[str, Any]] = split_data
-            self.ids = list(range(len(self.samples)))
-        else:
-            raise TypeError(
-                f"Unsupported split data type: {type(split_data)} "
-                f"(dict 또는 list만 지원합니다)"
-            )
-
-        # 전역 메타 정보
-        self.symbol_to_id = data.get("symbol_to_id", {})
-        self.rel_categories = data.get("rel_categories", {})
-        self.num_classes = data.get("num_classes", None)
-
+        self.json_path = json_path
+        self.split = split
         self.images_root = images_root
         self.feature_extractor = feature_extractor
-        self.transforms = transforms
 
-    # ----------------------------------------------------
-    # 🔥 이미지 경로 자동 해결: 확장자 / 경로 유연 처리
-    # ----------------------------------------------------
-    def _resolve_image_path(self, filename_field: str) -> str:
+        # ----- JSON 로드 -----
+        with open(json_path, "r") as f:
+            data = json.load(f)
+
+        # data가 {"train": [...], "val": [...]} 형태라고 가정
+        if isinstance(data, dict):
+            if split not in data:
+                raise KeyError(
+                    f"[FormulaGraphDataset] JSON 안에 split='{split}' 키가 없습니다. "
+                    f"존재하는 키: {list(data.keys())}"
+                )
+            self.samples: List[Dict[str, Any]] = data[split]
+        elif isinstance(data, list):
+            # 혹시라도 리스트 형태면 전체를 split 상관 없이 사용
+            print(
+                f"[FormulaGraphDataset] 경고: JSON이 리스트 형태입니다. "
+                f"split='{split}'을 무시하고 전체 {len(data)}개 샘플 사용."
+            )
+            self.samples = data
+        else:
+            raise ValueError(
+                f"[FormulaGraphDataset] 지원하지 않는 JSON 구조입니다: type={type(data)}"
+            )
+
+        if len(self.samples) == 0:
+            print(
+                f"[FormulaGraphDataset] 경고: split='{split}'에 해당하는 샘플이 0개입니다."
+            )
+
+        # ----- 클래스 개수(num_classes) 추정 -----
+        all_labels = []
+        for sample in self.samples:
+            all_labels.extend(sample.get("labels", []))
+        if all_labels:
+            self.num_classes = max(all_labels) + 1
+        else:
+            # 라벨이 하나도 없을 경우 fallback (거의 없겠지만)
+            print(
+                "[FormulaGraphDataset] WARNING: labels가 비어 있어서 num_classes=1로 설정합니다."
+            )
+            self.num_classes = 1
+
+        # ----- relation 카테고리 추출 -----
+        # relations: [ [sub_idx, obj_idx, rel_type], ... ]
+        rel_value_set = set()
+        for sample in self.samples:
+            for s, o, p in sample.get("relations", []):
+                rel_value_set.add(p)
+
+        # 예: p 값이 {1,2,4,5} 이런 식이면 정렬해서 [1,2,4,5]
+        self.rel_values: List[int] = sorted(rel_value_set)
+        # p 원본 값 -> 0 ~ (num_rel-1) 로 매핑
+        self.rel_id_map: Dict[int, int] = {
+            p_val: i for i, p_val in enumerate(self.rel_values)
+        }
+        # EGTR 쪽에서 이름만 필요하므로 문자열로
+        self.rel_categories: List[str] = [str(p_val) for p_val in self.rel_values]
+
+        if not self.rel_categories:
+            # relation이 하나도 없는 경우도 대비
+            print(
+                "[FormulaGraphDataset] WARNING: relations가 비어 있습니다. rel_categories도 비어 있음."
+            )
+
+        print(
+            f"[FormulaGraphDataset] Loaded {len(self.samples)} samples from '{json_path}' (split='{split}')"
+        )
+        print(f"[FormulaGraphDataset] num_classes = {self.num_classes}")
+        print(f"[FormulaGraphDataset] #rel_categories = {len(self.rel_categories)}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def _build_image_path(self, filename: str) -> str:
         """
-        JSON의 filename 필드를 이용해 실제 이미지 파일 경로를 찾는다.
+        JSON의 filename (예: 'crohme2019/train/MfrDB2372.inkml') 을
+        실제 이미지 경로로 변환.
 
-        1) images_root/ + filename_field 그대로 시도
-        2) 안 되면 base name만 뽑아서
-           base + [.png, .jpg, .jpeg, .bmp] 순서로 탐색
+        images_root = 'tools/HME_to_graph/data/crohme/images'
+        이고,
+        실제 파일이
+          tools/HME_to_graph/data/crohme/images/crohme2019/train/MfrDB2372.png
+        라고 있을 때를 가정.
         """
-        # 1) 그대로 시도
-        direct_path = os.path.join(self.images_root, filename_field)
-        if os.path.exists(direct_path):
-            return direct_path
+        # inkml -> png 로 확장자 변경
+        if filename.lower().endswith(".inkml"):
+            rel_path = filename[:-6] + ".png"
+        else:
+            # 이미 .png 라면 그대로 사용
+            rel_path = filename
 
-        # 2) base name + 다양한 확장자
-        base = os.path.basename(filename_field)
-        base_no_ext = os.path.splitext(base)[0]
+        image_path = os.path.join(self.images_root, rel_path)
+        return image_path
 
-        candidate_exts = [".png", ".jpg", ".jpeg", ".bmp"]
-        tried_paths = [direct_path]
+    def __getitem__(self, idx: int):
+        sample = self.samples[idx]
 
-        for ext in candidate_exts:
-            cand = os.path.join(self.images_root, base_no_ext + ext)
-            tried_paths.append(cand)
-            if os.path.exists(cand):
-                return cand
+        # ----- 이미지 로드 -----
+        filename = sample["filename"]  # 예: 'crohme2019/train/MfrDB2372.inkml'
 
-        raise FileNotFoundError(
-            "[FormulaGraphDataset] 이미지 파일을 찾을 수 없습니다.\n"
-            f"  filename_field = '{filename_field}'\n"
-            f"  images_root    = '{self.images_root}'\n"
-            "  시도한 경로들:\n    - "
-            + "\n    - ".join(tried_paths)
+        # 1) .inkml → .png로 확장자만 변경
+        img_rel_path = filename
+        if img_rel_path.endswith(".inkml"):
+            img_rel_path = img_rel_path[:-6] + ".png"  # ".inkml" 길이 6
+
+        # 2) 실제 이미지 폴더 구조에 맞게 prefix 정리
+        #    JSON은 'crohme2019/train/...' 인데,
+        #    실제 폴더는 'train/...' 만 있다고 가정
+        if img_rel_path.startswith("crohme2019/"):
+            img_rel_path = img_rel_path[len("crohme2019/"):]  # 앞의 'crohme2019/' 잘라내기
+
+        # 3) 최종 경로 조합
+        img_path = os.path.join(self.images_root, img_rel_path)
+
+        if not os.path.exists(img_path):
+            raise FileNotFoundError(
+                f"[FormulaGraphDataset] 이미지 파일을 찾을 수 없습니다: {img_path} "
+                f"(json filename='{filename}')"
+            )
+
+
+        image = Image.open(img_path).convert("RGB")
+        width, height = image.size
+
+        # feature_extractor로 전처리
+        encoding = self.feature_extractor(images=image, return_tensors="pt")
+        # [1, C, H, W] -> [C, H, W]
+        pixel_values = encoding["pixel_values"].squeeze(0)
+
+        # ----- GT 라벨 구성 -----
+        labels = sample.get("labels", [])
+        bboxes = sample.get("bboxes", [])
+        relations = sample.get("relations", [])
+
+        num_objs = len(labels)
+        if len(bboxes) != num_objs:
+            # 이 경우는 데이터 오류. 일단 assert로 잡자.
+            raise ValueError(
+                f"[FormulaGraphDataset] labels 개수({len(labels)})와 "
+                f"bboxes 개수({len(bboxes)})가 다릅니다. idx={idx}, filename={filename}"
+            )
+
+        # boxes: [num_objs, 4] (x_min, y_min, x_max, y_max) 형식으로 가정
+        # JSON이 dummy인 경우 (0,0,1,1)이지만 형식만 맞으면 DE-TR는 학습은 됨.
+        boxes = torch.tensor(bboxes, dtype=torch.float32)  # [N, 4]
+        class_labels = torch.tensor(labels, dtype=torch.long)  # [N]
+
+        # rel: [num_objs, num_objs, num_rel_categories]
+        num_rel = len(self.rel_categories)
+        rel_tensor = torch.zeros(
+            (num_objs, num_objs, num_rel), dtype=torch.float32
         )
 
-    def __len__(self) -> int:
-        return len(self.ids)
+        for s_idx, o_idx, p_val in relations:
+            if s_idx < 0 or s_idx >= num_objs or o_idx < 0 or o_idx >= num_objs:
+                # 잘못된 index 방어
+                continue
+            if p_val not in self.rel_id_map:
+                # 정의되지 않은 relation value 방어
+                continue
+            p_idx = self.rel_id_map[p_val]
+            rel_tensor[s_idx, o_idx, p_idx] = 1.0
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        # -------------------------
-        # 0. 현재 샘플 ginfo 가져오기
-        # -------------------------
-        if self.mode == "dict":
-            gid = self.ids[idx]
-            ginfo = self.graphs[gid]
-        else:  # "list"
-            gid = idx
-            ginfo = self.samples[idx]
-
-        # -------------------------
-        # 1. 이미지 로드
-        # -------------------------
-        if "filename" not in ginfo:
-            raise KeyError(
-                f"Sample {gid} 에 'filename' 필드가 없습니다. "
-                f"JSON 생성 시 filename을 꼭 넣어줘야 합니다."
-            )
-
-        img_path = self._resolve_image_path(ginfo["filename"])
-        image = Image.open(img_path).convert("RGB")
-        w, h = image.size
-
-        # -------------------------
-        # 2. GT boxes / labels / relations
-        # -------------------------
-        # boxes / bboxes 둘 다 지원
-        if "boxes" in ginfo:
-            boxes_data = ginfo["boxes"]
-        elif "bboxes" in ginfo:
-            boxes_data = ginfo["bboxes"]
-        else:
-            raise KeyError(
-                f"Sample {gid} 에 'boxes' 또는 'bboxes' 필드가 없습니다.\n"
-                f"→ 학습용 JSON에는 반드시 bbox 정보가 들어가야 합니다."
-            )
-
-        if "labels" not in ginfo:
-            raise KeyError(
-                f"Sample {gid} 에 'labels' 필드가 없습니다.\n"
-                f"→ 각 심볼의 class id 리스트가 필요합니다."
-            )
-
-        boxes = torch.as_tensor(boxes_data, dtype=torch.float32)      # [N,4]
-        labels = torch.as_tensor(ginfo["labels"], dtype=torch.int64)  # [N]
-
-        rel_list = ginfo.get("relations", [])
-        if rel_list is None:
-            rel_list = []
-        relations = torch.as_tensor(rel_list, dtype=torch.int64)      # [M,3] 또는 [0,3]
-
-        target: Dict[str, Any] = {
-            "boxes": boxes,
-            "labels": labels,
-            "relations": relations,
-            "image_id": torch.tensor([idx], dtype=torch.int64),
-            "orig_size": torch.tensor([h, w], dtype=torch.int64),
+        # EGTR가 기대하는 target 포맷
+        target = {
+            "boxes": boxes,                     # [N, 4]
+            "class_labels": class_labels,       # [N]
+            "rel": rel_tensor,                  # [N, N, num_rel]
+            "orig_size": torch.tensor([height, width], dtype=torch.long),
+            "size": torch.tensor([height, width], dtype=torch.long),
+            "image_id": torch.tensor(idx, dtype=torch.long),
         }
-
-        if "latex" in ginfo:
-            target["latex"] = ginfo["latex"]
-
-        # -------------------------
-        # 3. transforms (augmentation)
-        # -------------------------
-        if self.transforms is not None:
-            image, target = self.transforms(image, target)
-
-        # -------------------------
-        # 4. feature_extractor (DETR/EGTR 전처리)
-        # -------------------------
-        if self.feature_extractor is not None:
-            encoded = self.feature_extractor(
-                images=image,
-                return_tensors="pt",
-            )
-            # encoded["pixel_values"]: [1, C, H, W]
-            pixel_values = encoded["pixel_values"].squeeze(0)
-        else:
-            # feature_extractor를 안 쓰는 경우: 직접 ToTensor
-            arr = np.array(image).astype("float32") / 255.0  # [H,W,C]
-            arr = arr.transpose(2, 0, 1)                     # [C,H,W]
-            pixel_values = torch.from_numpy(arr)
 
         return pixel_values, target
