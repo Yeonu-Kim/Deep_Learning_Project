@@ -6,136 +6,229 @@ from PIL import Image
 import numpy as np
 from tqdm import tqdm
 
+import os
+import json
+import torch
+from torch.utils.data import Dataset
+from PIL import Image
+import numpy as np
+from tqdm import tqdm
+
 class CROHMEDataset(Dataset):
     """
-    Custom dataset for LaTeX symbol graphs
-    Assumes annotation JSON has structure:
-    {
-        "test": {
-            "UN19_1032_em_455": {
-                "relations": [[103,1,3],[2,200,1],[200,3,4]],
-                "filename": "crohme2019/test/UN19_1032_em_455.inkml"
-            },
-            ...
-        },
-        "rel_categories": {"__background__":0,"Right":1,...},
-        "num_classes": 320,
-        "symbol_to_id": {"0":0,"1":1,...}
-    }
+    Unified CROHME dataset:
+    - Loads graph structure (relations)
+    - Loads COCO-style bbox annotations
+    - Preserves all attributes from original CROHMEDataset
     """
 
     def __init__(self, data_folder, feature_extractor, split, debug=False, num_object_queries=100):
         self.data_folder = data_folder
         self.split = split
         self.feature_extractor = feature_extractor
-        self.num_object_queries = num_object_queries  # max number of symbols per formula
-
-        # load annotation
-        with open(os.path.join(data_folder, f"{split}/{split}_graphs.json"), "r") as f:
+        self.num_object_queries = num_object_queries  # max number of symbols
+        
+        # ---------------------------------------------------------
+        # 1) Load Graph Annotation (original ann_data)
+        # ---------------------------------------------------------
+        graph_json_path = os.path.join(data_folder, split, f"{split}_graphs.json")
+        with open(graph_json_path, "r") as f:
             self.ann_data = json.load(f)
 
-        self.data = self.ann_data["test"]
+        # same naming as the original CROHME dataset
+        self.data = self.ann_data.get("test", {})
         self.rel_categories = self.ann_data["rel_categories"]
         self.symbol_to_id = self.ann_data["symbol_to_id"]
         self.num_rel_classes = len(self.rel_categories)
-        self.ids = list(self.data.keys())
         self.num_classes = self.ann_data["num_classes"]
 
+        # graph keys (original "ids")
+        self.ids = list(self.data.keys())
+
+        # ---------------------------------------------------------
+        # 2) Load COCO-style BBox JSON
+        # ---------------------------------------------------------
+        coco_json_path = os.path.join(data_folder, split, f"{split}.json")
+        with open(coco_json_path, "r") as f:
+            self.coco_data = json.load(f)
+
+        self.images = {img["id"]: img for img in self.coco_data["images"]}
+        self.categories = {cat["id"]: cat for cat in self.coco_data["categories"]}
+
+        # image_id list for indexing
+        self.image_ids = list(self.images.keys())
+
+        # group annotations by image
+        self.image_annotations = {}
+        for ann in self.coco_data["annotations"]:
+            img_id = ann["image_id"]
+            if img_id not in self.image_annotations:
+                self.image_annotations[img_id] = []
+            self.image_annotations[img_id].append(ann)
+
+        # Debug: shrink dataset
+        if debug:
+            self.image_ids = self.image_ids[:8]
+
+    # -------------------------------------------------------------
     def __len__(self):
-        return len(self.ids)
+        return len(self.image_ids)
 
+    # -------------------------------------------------------------
     def __getitem__(self, idx):
-        item_id = self.ids[idx]
-        ann = self.data[item_id]
+        image_id = self.image_ids[idx]
+        img_info = self.images[image_id]
 
-        # 이미지 읽기
-        filename = ann["filename"]
-        filename = filename.replace('crohme2019/valid/', 'valid/images/')
-        filename = filename.replace('crohme2019/train/', 'train/images/')
-        filename = filename.replace('crohme2019/test/', 'test/images/')
-        # inkml을 png로 변환
-        if filename.endswith('.inkml'):
-            filename = filename[:-6] + '.png'
-        
-        img_path = os.path.join(self.data_folder, filename)
+        # ---------------------------------------------------------
+        # Load image
+        # ---------------------------------------------------------
+        img_path = os.path.join(self.data_folder, self.split, "images", img_info["file_name"])
+        if not os.path.exists(img_path):
+            return self.__getitem__((idx + 1) % len(self))
+
         img = Image.open(img_path).convert("RGB")
 
-        # symbol_ids & relations
-        relations = ann.get("relations", [])
-        symbol_set = set()
-        for rel in relations:
-            if len(rel) >= 2:
-                symbol_set.add(rel[0])  # subject
-                symbol_set.add(rel[1])  # object
-        symbol_ids = sorted(list(symbol_set))
-        relations = ann["relations"]  # already in symbol_ids form [[sub_id, obj_id, rel_id], ...]
+        # ---------------------------------------------------------
+        # BBox & Label handling
+        # ---------------------------------------------------------
+        annotations = self.image_annotations.get(image_id, [])
+        num_objects = min(len(annotations), self.num_object_queries)
 
-        # optional: truncate or pad
-        num_symbols = len(symbol_ids)
-        if num_symbols > self.num_object_queries:
-            symbol_ids = symbol_ids[:self.num_object_queries]
-            num_symbols = self.num_object_queries
-        
-        symbol_to_idx = {sid: i for i, sid in enumerate(symbol_ids)}
-        padded_symbol_ids = symbol_ids + [0] * (self.num_object_queries - len(symbol_ids))
+        boxes, class_labels, areas = [], [], []
 
-        # convert relations to tensor
-        rel_tensor = torch.zeros((self.num_object_queries, self.num_object_queries, self.num_rel_classes), dtype=torch.float32)
-        
-        for relation in relations:
-            if len(relation) != 3:
-                continue
-            sub_id, obj_id, rel_id = relation
-            
-            # Map symbol IDs to indices
-            if sub_id in self.symbol_to_id and obj_id in self.symbol_to_id:
-                sub_idx = self.symbol_to_id[sub_id]
-                obj_idx = self.symbol_to_id[obj_id]
-                
-                if sub_idx < self.num_object_queries and obj_idx < self.num_object_queries:
-                    if 0 <= rel_id < self.num_rel_classes:
-                        rel_tensor[sub_idx, obj_idx, rel_id] = 1.0
+        for ann in annotations[:num_objects]:
+            x, y, w, h = ann["bbox"]
+            boxes.append([x, y, x + w, y + h])
+            class_labels.append(ann["category_id"])
+            areas.append(ann["area"])
 
-        # EGTR에서 필요한 필드들
+        # pad to num_object_queries
+        while len(boxes) < self.num_object_queries:
+            boxes.append([0, 0, 0, 0])
+            class_labels.append(0)
+            areas.append(0)
+
+        boxes = torch.tensor(boxes, dtype=torch.float32)
+        class_labels = torch.tensor(class_labels, dtype=torch.long)
+        areas = torch.tensor(areas, dtype=torch.float32)
+
+        # normalize [x_min, y_min, x_max, y_max]
+        img_w, img_h = img_info["width"], img_info["height"]
+        boxes = boxes / torch.tensor([img_w, img_h, img_w, img_h], dtype=torch.float32)
+
+        # convert to (cx, cy, w, h)
+        boxes_cxcywh = torch.zeros_like(boxes)
+        boxes_cxcywh[:, 0] = (boxes[:, 0] + boxes[:, 2]) / 2
+        boxes_cxcywh[:, 1] = (boxes[:, 1] + boxes[:, 3]) / 2
+        boxes_cxcywh[:, 2] = boxes[:, 2] - boxes[:, 0]
+        boxes_cxcywh[:, 3] = boxes[:, 3] - boxes[:, 1]
+
+        # ---------------------------------------------------------
+        # Relation graph (from ann_data)
+        # ---------------------------------------------------------
+        rel_tensor = torch.zeros(
+            (self.num_object_queries, self.num_object_queries, self.num_rel_classes),
+            dtype=torch.float32
+        )
+
+        item_key = img_info["file_name"].replace(".png", "")
+        if item_key in self.data:
+            relations = self.data[item_key].get("relations", [])
+            for sub_id, obj_id, rel_id in relations:
+                if (sub_id < num_objects and obj_id < num_objects
+                        and 0 <= rel_id < self.num_rel_classes):
+                    rel_tensor[sub_id, obj_id, rel_id] = 1.0
+
+        # ---------------------------------------------------------
+        # EGTR target
+        # ---------------------------------------------------------
         target = {
-            "class_labels": torch.tensor(padded_symbol_ids, dtype=torch.long),  # EGTR expects this
-            "boxes": torch.zeros((self.num_object_queries, 4), dtype=torch.float32),  # dummy boxes
+            "class_labels": class_labels,
+            "boxes": boxes_cxcywh,
             "rel": rel_tensor,
-            "image_id": torch.tensor([idx], dtype=torch.long),
-            "orig_size": torch.tensor([img.height, img.width], dtype=torch.long),
-            "size": torch.tensor([img.height, img.width], dtype=torch.long),
-            "item_id": item_id,
-            "filename": ann["filename"],
+            "area": areas,
+            "iscrowd": torch.zeros(self.num_object_queries, dtype=torch.int64),
+            "image_id": torch.tensor([image_id]),
+            "orig_size": torch.tensor([img_h, img_w]),
+            "size": torch.tensor([img_h, img_w]),
+            "item_id": item_key,
+            "filename": img_info["file_name"],
         }
 
+        # ---------------------------------------------------------
+        # Feature extractor
+        # ---------------------------------------------------------
         encoding = self.feature_extractor(images=img, return_tensors="pt")
-        pixel_values = encoding["pixel_values"].squeeze()
+        pixel_values = encoding["pixel_values"].squeeze(0)
+
         return pixel_values, target
 
-def latex_symbol_graph_get_statistics(dataset, must_exist=True):
+
+
+def latex_symbol_graph_get_statistics(dataset, must_overlap=True):
     """
-    LaTeX symbol graph용 관계 빈도 행렬 생성
-    :param dataset: LaTeXGraphDataset 또는 유사 dataset
-    :param must_exist: True이면 relations가 비어있으면 무시
-    :return:
-        fg_matrix: [num_symbols, num_symbols, num_relations] int64
+    CROHME dataset용 관계 빈도 행렬 생성
+    
+    Args:
+        dataset: CROHMEDataset
+        must_overlap: True이면 bbox가 겹치는 경우만 카운트
+    
+    Returns:
+        fg_matrix: [num_classes, num_classes, num_relations] int64
     """
-    num_symbols = dataset.ann_data["num_classes"]
-    num_relations = len(dataset.rel_categories)
-
-    fg_matrix = np.zeros((num_symbols, num_symbols, num_relations), dtype=np.int64)
-
-    for idx in range(len(dataset)):
-        item_id = dataset.ids[idx]
-        ann = dataset.data[item_id]
-        relations = ann["relations"]  # [[sub_symbol_id, obj_symbol_id, rel_id], ...]
-
-        if must_exist and len(relations) == 0:
+    num_classes = dataset.num_classes
+    num_relations = dataset.num_rel_classes
+    
+    fg_matrix = np.zeros((num_classes, num_classes, num_relations), dtype=np.int64)
+    
+    print(f"Computing statistics for {len(dataset)} samples...")
+    
+    for idx in tqdm(range(len(dataset))):
+        try:
+            _, target = dataset[idx]
+            
+            class_labels = target['class_labels'].numpy()
+            boxes = target['boxes'].numpy()
+            relations = target['rel'].numpy()
+            
+            # Find valid objects (non-padding)
+            valid_mask = class_labels > 0
+            valid_indices = np.where(valid_mask)[0]
+            
+            if len(valid_indices) == 0:
+                continue
+            
+            # Count relations
+            for i in valid_indices:
+                for j in valid_indices:
+                    if i == j:
+                        continue
+                    
+                    # Check if there's a relation
+                    rel_types = np.where(relations[i, j, :] > 0)[0]
+                    
+                    if len(rel_types) > 0:
+                        sub_class = class_labels[i]
+                        obj_class = class_labels[j]
+                        
+                        # Check bbox overlap if required
+                        if must_overlap:
+                            box1 = boxes[i]
+                            box2 = boxes[j]
+                            
+                            # Simple overlap check (can be refined)
+                            overlap = not (box1[0] > box2[2] or box1[2] < box2[0] or
+                                         box1[1] > box2[3] or box1[3] < box2[1])
+                            
+                            if not overlap:
+                                continue
+                        
+                        # Count each relation type
+                        for rel_type in rel_types:
+                            fg_matrix[sub_class, obj_class, rel_type] += 1
+        
+        except Exception as e:
+            print(f"Error processing index {idx}: {e}")
             continue
-
-        for sub_id, obj_id, rel_id in relations:
-            # symbol 개수가 max_objects보다 많으면 넘어갈 수도 있음
-            if sub_id < num_symbols and obj_id < num_symbols:
-                fg_matrix[sub_id, obj_id, rel_id] += 1
-
+    
     return fg_matrix

@@ -412,10 +412,18 @@ class SGG(pl.LightningModule):
         loss, loss_dict = self.common_step(batch, batch_idx)
         # logs metrics for each training_step,
         # and the average across the epoch
+        batch_size = batch["pixel_values"].shape[0]
         log_dict = {
             "step": torch.tensor(self.global_step, dtype=torch.float32),
             "training_loss": loss.item(),
         }
+        self.log("loss", loss, prog_bar=True, batch_size=batch_size, on_step=True, on_epoch=True)
+        self.log("loss_ce", loss_dict["loss_ce"], prog_bar=True, batch_size=batch_size, on_step=True, on_epoch=True)
+        self.log("loss_bbox", loss_dict["loss_bbox"], prog_bar=True, batch_size=batch_size, on_step=True, on_epoch=True)
+        self.log("loss_conn", loss_dict["loss_connectivity"], prog_bar=True, batch_size=batch_size, on_step=True, on_epoch=True)
+        self.log("loss_rel", loss_dict["loss_rel"], prog_bar=True, batch_size=batch_size, on_step=True, on_epoch=True)
+        self.log("loss_conn", loss_dict["loss_connectivity"], prog_bar=True, batch_size=batch_size, on_step=True, on_epoch=True)
+
         # ADD: Graph Only 모드 추가, relation loss만 사용하도록 설정
         if self.graph_only:
             log_dict.update({
@@ -671,6 +679,7 @@ if __name__ == "__main__":
     parser.add_argument("--filter_multiple_rels", type=str2bool, default=True)  # for OI
     parser.add_argument("--use_freq_bias", type=str2bool, default=True)
     parser.add_argument("--use_log_softmax", type=str2bool, default=False)
+    parser.add_argument("--graph_only", type=str2bool, default=False)
 
     # Evaluation
     parser.add_argument("--skip_train", type=str2bool, default=False)
@@ -715,9 +724,10 @@ if __name__ == "__main__":
             feature_extractor=feature_extractor,
             split="valid",
             num_object_queries=args.num_queries,
+            debug=args.debug,
         )
         id2label = {int(v): k for k, v in train_dataset.symbol_to_id.items()}
-        fg_matrix = latex_symbol_graph_get_statistics(train_dataset, must_exist=True)
+        fg_matrix = latex_symbol_graph_get_statistics(train_dataset, must_overlap=True)
     # else:
     #     train_dataset = OIDataset(
     #         data_folder=args.data_path,
@@ -872,7 +882,7 @@ if __name__ == "__main__":
         logit_adjustment=args.logit_adjustment,
         logit_adj_tau=args.logit_adj_tau,
         # ADD: Graph Only 모듈 추가
-        graph_only=True
+        graph_only=args.graph_only
     )
 
     # Callback
