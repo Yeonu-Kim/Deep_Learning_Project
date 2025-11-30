@@ -5,19 +5,33 @@
 
 예시 실행:
 
-    # HME100K    
-    (formula-ocr) python -m tools.formula.graph2latex.demo \\
-        --mode hme100k \\
-        --json_path tools/formula/graph2latex/examples/test_graphs_hme.json \\
-        --key test_10
-    
-    # CROHME 
-    (formula-ocr) python -m tools.formula.graph2latex.demo \\
-        --mode crohme \\
-        --json_path tools/formula/graph2latex/examples/crohme_graphs_sample.json \\
-        --key some_id \\
-        --latex_class_json data/formula/latex_class.json
+    # 1) HME100K (예제 JSON)
+    (formula-ocr) python -m tools.formula.graph2latex.demo \
+        --mode hme100k \
+        --json_path tools/formula/graph2latex/examples/test_graphs_hme.json \
+        --split_key test \
+        --sample_key test_10
 
+    # 2) CROHME 그래프 전용 (train_graphs.json 등)
+    (formula-ocr) python -m tools.formula.graph2latex.demo \
+        --mode crohme_graphs \
+        --json_path dataset/train/train_graphs.json \
+        --split_key test \
+        --sample_key MfrDB2372
+
+설명:
+
+- hme100k 모드:
+    - JSON 구조: { "test": { "test_10": {...}, ... } } 또는 { "some_id": {...}, ... }
+    - sample에는 'relations', 'filename', 'latex' 등이 들어 있다고 가정.
+    - build_nodes_from_hme100k_json()으로 Node dict를 만든 뒤,
+      decode_formula_graph()로 LaTeX 문자열을 복원.
+
+- crohme_graphs 모드:
+    - JSON 구조: { "test": { "MfrDB2372": {...}, ... } } 또는 { "MfrDB2372": {...}, ... }
+    - sample에는 'relations', 'filename'만 있고, symbol label/bbox는 없다고 가정.
+    - build_nodes_from_crohme_graphs_json() 안에서
+      dummy label/bbox로 Node를 만들고, 관계 그래프 구조만 테스트용으로 디코딩.
 """
 
 import argparse
@@ -26,7 +40,7 @@ from typing import Any, Dict
 
 from .adapters import (
     build_nodes_from_hme100k_json,
-    build_nodes_from_crohme_json,
+    build_nodes_from_crohme_graphs_json,
 )
 from .decoder import decode_formula_graph
 
@@ -36,91 +50,103 @@ def load_json(path: str) -> Dict[str, Any]:
         return json.load(f)
 
 
+def pick_sample(
+    data: Dict[str, Any],
+    split_key: str | None,
+    sample_key: str | None,
+) -> tuple[str, Dict[str, Any]]:
+    """
+    공통 유틸:
+    - data: json 전체
+    - split_key: 최상단에 split 이름이 있을 경우 (예: 'test')
+    - sample_key: split 안에서 사용할 key (예: 'MfrDB2372', 'test_10')
+
+    return: (실제로 사용한 sample_key, sample_dict)
+    """
+    # 1) split 선택
+    if split_key is not None and isinstance(data, dict) and split_key in data:
+        bucket = data[split_key]
+    else:
+        bucket = data
+
+    if not isinstance(bucket, dict):
+        raise ValueError(f"Bucket is not a dict. Got type={type(bucket)}")
+
+    # 2) sample 선택
+    if sample_key is None:
+        # key를 안 줬으면 첫 번째 key 사용
+        sample_key = next(iter(bucket.keys()))
+
+    if sample_key not in bucket:
+        raise KeyError(f"Sample key '{sample_key}' not found in bucket keys.")
+
+    return sample_key, bucket[sample_key]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
+
     parser.add_argument(
         "--json_path",
         type=str,
         required=True,
-        help="입력 JSON 파일 경로",
-    )
-    parser.add_argument(
-        "--key",
-        type=str,
-        required=False,
-        help="JSON 상에서 샘플을 선택하기 위한 key (예: 'test_10')",
+        help="입력 그래프 JSON 파일 경로",
     )
     parser.add_argument(
         "--mode",
         type=str,
         default="hme100k",
-        choices=["hme100k", "crohme"],
-        help="HME100K 또는 CROHME 포맷 선택",
+        choices=["hme100k", "crohme_graphs"],
+        help="HME100K 또는 CROHME 그래프 전용 포맷 선택",
     )
     parser.add_argument(
-        "--latex_class_json",
+        "--split_key",
         type=str,
-        default="data/formula/latex_class.json",
-        help="CROHME 모드에서 class_id -> LaTeX 토큰 매핑 JSON 경로",
+        default=None,
+        help="최상단에 split이 있을 경우 해당 key (예: 'test')",
+    )
+    parser.add_argument(
+        "--sample_key",
+        type=str,
+        default=None,
+        help="split 안에서 사용할 샘플 ID (예: 'test_10', 'MfrDB2372'). "
+             "지정하지 않으면 첫 번째 샘플 사용",
     )
 
     args = parser.parse_args()
 
     data = load_json(args.json_path)
+    sample_key, sample = pick_sample(
+        data=data,
+        split_key=args.split_key,
+        sample_key=args.sample_key,
+    )
 
+    # =========================
     # 1) HME100K 모드
-    # { "test": { "test_10": {...}, "test_1000": {...}, ... } }
+    # =========================
     if args.mode == "hme100k":
-        if "test" in data:
-            bucket = data["test"]
-        else:
-            bucket = data
-
-        if args.key is None:
-            # key가 없으면 첫 번째 샘플 사용
-            sample_key = next(iter(bucket.keys()))
-        else:
-            sample_key = args.key
-
-        sample = bucket[sample_key]
         nodes = build_nodes_from_hme100k_json(sample)
         formula = decode_formula_graph(nodes)
 
-        print(f"[mode    ] hme100k")
-        print(f"[filename] {sample.get('filename')}")
-        print(f"[gt latex] {sample.get('latex')}")
-        print(f"[decoded ] {formula}")
+        print(f"[mode      ] hme100k")
+        print(f"[sample key] {sample_key}")
+        print(f"[filename  ] {sample.get('filename')}")
+        print(f"[gt latex  ] {sample.get('latex')}")
+        print(f"[decoded   ] {formula}")
         return
-    
-    # 2) CROHME 모드
-    if args.mode == "crohme":
-        # CROHME JSON 구조는 아직 확정되지 않았으므로
-        # 일단 HME100K와 비슷하게 'bucket'에서 key로 하나 뽑는 틀만 맞춰둠
-        if isinstance(data, dict) and args.key is not None:
-            # 최상단 dict에서 바로 key로 접근하는 경우
-            if args.key in data:
-                sample = data[args.key]
-            else:
-                raise KeyError(f"Key '{args.key}' not found in JSON.")
-        elif isinstance(data, dict) and args.key is None:
-            # key를 안 줬다면 첫 번째 엔트리를 사용
-            sample_key = next(iter(data.keys()))
-            sample = data[sample_key]
-        else:
-            # 예상에 다른 구조라면 그대로 에러
-            raise ValueError("Unexpected CROHME JSON structure")
 
-        # class id -> LaTeX toekn mapping ( ex. latex_class.json)
-        id2latex = load_json(args.latex_class_json)
-
-        # 아직 build_nodes_from_crohme_json은 NotImplemented 상태라
-        # 실제 실행 시에는 NotImplementedError가 날 수 있음
-        nodes = build_nodes_from_crohme_json(sample, id2latex)
+    # =========================
+    # 2) CROHME 그래프 모드
+    # =========================
+    if args.mode == "crohme_graphs":
+        nodes = build_nodes_from_crohme_graphs_json(sample)
         formula = decode_formula_graph(nodes)
 
-        print(f"[mode    ] crohme")
-        print(f"[filename] {sample.get('filename', '(no filenema)')}")
-        print(f"[decoded ] {formula}")
+        print(f"[mode      ] crohme_graphs")
+        print(f"[sample key] {sample_key}")
+        print(f"[filename  ] {sample.get('filename', '(no filename)')}")
+        print(f"[decoded   ] {formula}")
         return
 
 

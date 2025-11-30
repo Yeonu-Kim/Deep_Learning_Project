@@ -50,29 +50,74 @@ def build_nodes_from_hme100k_json(sample: Dict[str, Any]) -> Dict[int, Node]:
     return nodes
 
 
-def build_nodes_from_crohme_json(
-    sample: Dict[str, Any],
-    id2latex: Dict[int, str],
-) -> Dict[int, Node]:
+def build_nodes_from_crohme_graphs_json(sample_dict):
     """
-    TODO: 연우가 만든 formula graph JSON 포맷에 맞춰 구현할 예정.
+    CROHME 스타일의 *graph-only* JSON 한 개를
+    id -> Node 딕셔너리로 변환한다.
 
-    예상 포맷 예시(가정):
-
-    sample = {
-        "symbols": [
-            {"id": 0, "class_id": 12, "bbox": [x1,y1,x2,y2]},
+    sample_dict 예시:
+    {
+        "relations": [
+            [15, 232, 5],
+            [167, 33, 1],
             ...
         ],
-        "relations": [
-            {"from": 0, "to": 1, "type": "Right"},
-            ...
-        ]
+        "filename": "crohme2019/train/MfrDB2372.inkml"
     }
 
-    - id2latex: class_id -> LaTeX 토큰 매핑 (latex_class.json)
+    주의:
+    - 현재 JSON에는 symbol label / bbox 정보가 없다.
+    - 따라서 여기서는 label, bbox를 dummy로 세팅하고
+      '관계 그래프 구조'만 Node에 담는다.
+
+    나중에 symbol-level JSON이 생기면:
+    - Node(label, bbox)를 그 JSON 기준으로 채우고
+    - 이 함수는 relations만 연결해주는 쪽으로 수정하면 된다.
     """
-    # 아직 포맷이 확정되지 않았으므로 일단 NotImplementedError로 남겨둔다.
-    raise NotImplementedError(
-        "build_nodes_from_crohme_json()은 연우 JSON 포맷 확정 후 구현 예정입니다."
-    )
+
+    relations = sample_dict.get("relations", [])
+
+    # relations에 등장하는 node id 집합 먼저 모으기
+    node_ids = set()
+    for src, dst, _rel in relations:
+        node_ids.add(src)
+        node_ids.add(dst)
+
+    # Node 생성 (dummy label / bbox)
+    nodes = {}
+    for nid in node_ids:
+        # label은 일단 더미: v{nid}
+        # bbox는 아직 정보 없으므로 None
+        nodes[nid] = Node(
+            node_id=nid,
+            label=f"v{nid}",
+            bbox=None,
+        )
+
+    # relation id -> relation type 문자열 매핑 (임시)
+    # TODO: 연우/슬라이드 보고 실제 의미에 맞게 수정하기
+    relation_id_to_type = {
+        1: "right",       # 기본 가로 연결
+        2: "above",       # 분자, 위쪽?
+        3: "below",       # 분모, 아래쪽?
+        4: "attach",      # 괄호 사이, 루트/분수 기준?
+        5: "nolink",      # NoRel 느낌의 관계?
+        6: "inside",      # 괄호/루트 안쪽?
+    }
+
+    # 관계를 Node에 연결하기
+    for src, dst, rel_id in relations:
+        if src not in nodes or dst not in nodes:
+            continue
+
+        rel_type = relation_id_to_type.get(rel_id, "right")
+
+        src_node = nodes[src]
+        dst_node = nodes[dst]
+
+        # Node 클래스 안에 이런 메서드가 있다고 가정:
+        #   src_node.add_child(relation_type: str, child_node: Node)
+        #   그리고 child_node.parents 같은 것도 내부에서 갱신
+        src_node.add_child(rel_type, dst_node)
+
+    return nodes
