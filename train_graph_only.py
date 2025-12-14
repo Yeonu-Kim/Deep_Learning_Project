@@ -19,7 +19,7 @@ from pytorch_lightning.strategies.ddp import DDPStrategy
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from torch.utils.data import DataLoader
 
-from data.crohme import CROHMEDataset, latex_symbol_graph_get_statistics
+from data.crohme import CROHMEDataset, crohme_get_statistics
 from data.open_image import OIDataset, oi_get_statistics
 from data.visual_genome import VGDataset, vg_get_statistics
 from lib.evaluation.crohme_eval import CROHMEEvaluator
@@ -459,6 +459,17 @@ class SGG(pl.LightningModule):
             log_dict[f"validation_{k}"] = (
                 torch.stack([x[k] for x in self._val_outputs]).mean().item()
             )
+        if self.crohme_evaluator is not None:
+            self.crohme_evaluator.synchronize_between_processes()
+            self.crohme_evaluator.accumulate()
+            metrics = self.crohme_evaluator.summarize()
+            log_dict.update({
+                'val_crohme_edge_f1': metrics['edge_f1'],
+                'val_crohme_relation_f1': metrics['relation_f1'],
+                'val_crohme_graph_acc': metrics['graph_accuracy']
+            })
+            self.crohme_evaluator.reset()
+            
         self.log_dict(log_dict, on_epoch=True)
         # RENEW: 에폭마다 초기화
         self._val_outputs = [] 
@@ -726,8 +737,8 @@ if __name__ == "__main__":
             num_object_queries=args.num_queries,
             debug=args.debug,
         )
-        id2label = {int(v): k for k, v in train_dataset.symbol_to_id.items()}
-        fg_matrix = latex_symbol_graph_get_statistics(train_dataset, must_overlap=True)
+        id2label = train_dataset.id2label
+        fg_matrix = crohme_get_statistics(train_dataset, must_overlap=True)
     # else:
     #     train_dataset = OIDataset(
     #         data_folder=args.data_path,
