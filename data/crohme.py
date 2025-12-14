@@ -44,6 +44,35 @@ class CROHMEDetection(torchvision.datasets.CocoDetection):
         
         return pixel_values, target
 
+        # graph keys (original "ids")
+        self.ids = list(self.data.keys())
+
+        # ---------------------------------------------------------
+        # 2) Load COCO-style BBox JSON
+        # ---------------------------------------------------------
+        coco_json_path = os.path.join(data_folder, split, f"{split}.json")
+        with open(coco_json_path, "r") as f:
+            self.coco_data = json.load(f)
+
+        self.images = {img["id"]: img for img in self.coco_data["images"]}
+        self.categories = {cat["id"]: cat for cat in self.coco_data["categories"]}
+
+        # image_id list for indexing
+        self.image_ids = list(self.images.keys())
+
+        # group annotations by image
+        self.image_annotations = {}
+        for ann in self.coco_data["annotations"]:
+            img_id = ann["image_id"]
+            if img_id not in self.image_annotations:
+                self.image_annotations[img_id] = []
+            self.image_annotations[img_id].append(ann)
+
+        # Debug: shrink dataset
+        if debug:
+            self.image_ids = self.image_ids[:8]
+
+    # -------------------------------------------------------------
     def __len__(self):
         if self.debug and self.split == "train":
             return 8
@@ -103,6 +132,7 @@ class CROHMEDataset(CROHMEDetection):
         else:
             print(f"  - Relation categories (first 10): {self.rel_categories[:10]}...")
 
+    # -------------------------------------------------------------
     def __getitem__(self, idx):
         # PIL 이미지와 COCO 형식 target 읽기
         img, target = super(CROHMEDetection, self).__getitem__(idx)
