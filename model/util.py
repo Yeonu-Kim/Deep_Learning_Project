@@ -111,6 +111,36 @@ def generalized_box_iou(boxes1, boxes2):
     """
     # degenerate boxes gives inf / nan results
     # so do an early check
+    # Check boxes1
+    invalid_mask1 = boxes1[:, 2:] < boxes1[:, :2]
+    if invalid_mask1.any():
+        invalid_indices1 = torch.where(invalid_mask1.any(dim=1))[0]
+        print("\n" + "="*80)
+        print("ERROR: Invalid boxes found in boxes1!")
+        print(f"Number of invalid boxes: {len(invalid_indices1)}")
+        print(f"Invalid box indices: {invalid_indices1.tolist()}")
+        for idx in invalid_indices1[:10]:  # Show first 10
+            box = boxes1[idx]
+            print(f"  Box {idx}: [{box[0]:.6f}, {box[1]:.6f}, {box[2]:.6f}, {box[3]:.6f}]")
+            print(f"    x1={box[0]:.6f}, y1={box[1]:.6f}, x2={box[2]:.6f}, y2={box[3]:.6f}")
+            print(f"    width={box[2]-box[0]:.6f}, height={box[3]-box[1]:.6f}")
+        print("="*80 + "\n")
+    
+    # Check boxes2
+    invalid_mask2 = boxes2[:, 2:] < boxes2[:, :2]
+    if invalid_mask2.any():
+        invalid_indices2 = torch.where(invalid_mask2.any(dim=1))[0]
+        print("\n" + "="*80)
+        print("ERROR: Invalid boxes found in boxes2!")
+        print(f"Number of invalid boxes: {len(invalid_indices2)}")
+        print(f"Invalid box indices: {invalid_indices2.tolist()}")
+        for idx in invalid_indices2[:10]:  # Show first 10
+            box = boxes2[idx]
+            print(f"  Box {idx}: [{box[0]:.6f}, {box[1]:.6f}, {box[2]:.6f}, {box[3]:.6f}]")
+            print(f"    x1={box[0]:.6f}, y1={box[1]:.6f}, x2={box[2]:.6f}, y2={box[3]:.6f}")
+            print(f"    width={box[2]-box[0]:.6f}, height={box[3]-box[1]:.6f}")
+        print("="*80 + "\n")
+
     assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
     assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
     iou, union = box_iou(boxes1, boxes2)
