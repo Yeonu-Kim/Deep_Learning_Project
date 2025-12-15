@@ -649,7 +649,7 @@ if __name__ == "__main__":
     )  # set to "architecture" when from_scratch is True
 
     # Hyperparameters
-    parser.add_argument("--num_queries", type=int, default=200)
+    parser.add_argument("--num_queries", type=int, default=100)
     parser.add_argument("--ce_loss_coefficient", type=float, default=2.0)
     parser.add_argument("--rel_loss_coefficient", type=float, default=15.0)
     parser.add_argument(
@@ -671,9 +671,9 @@ if __name__ == "__main__":
     parser.add_argument("--gpus", type=int, default=8)
     parser.add_argument("--max_epochs", type=int, default=50)
     parser.add_argument("--max_epochs_finetune", type=int, default=25)
-    parser.add_argument("--lr_backbone", type=float, default=2e-7)
-    parser.add_argument("--lr", type=float, default=2e-6)
-    parser.add_argument("--lr_initialized", type=float, default=2e-4)  # for pretrained
+    parser.add_argument("--lr_backbone", type=float, default=2e-7) # 2e-7
+    parser.add_argument("--lr", type=float, default=2e-6) # 2e-6
+    parser.add_argument("--lr_initialized", type=float, default=2e-4)  # for pretrained, 2e-4
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--gradient_clip_val", type=float, default=0.1)
 
@@ -926,7 +926,7 @@ if __name__ == "__main__":
                 #####
                 max_epochs=args.max_epochs,
                 gradient_clip_val=args.gradient_clip_val,
-                strategy=DDPStrategy(find_unused_parameters=True),
+                strategy=DDPStrategy(find_unused_parameters=False),
                 callbacks=[checkpoint_callback, early_stop_callback],
                 accumulate_grad_batches=args.accumulate,
             )
@@ -1018,7 +1018,7 @@ if __name__ == "__main__":
                 devices=args.gpus,
                 #####
                 gradient_clip_val=args.gradient_clip_val,
-                strategy=DDPStrategy(find_unused_parameters=True),
+                strategy=DDPStrategy(find_unused_parameters=False),
                 callbacks=[checkpoint_callback, early_stop_callback],
                 accumulate_grad_batches=args.accumulate,
             )
